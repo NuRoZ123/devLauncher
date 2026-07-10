@@ -69,6 +69,17 @@ export function CustomActionManager({ actions, colors, onChange, onColor }: Prop
             value={a.command}
             onChange={(e) => update(a.id, { command: e.target.value })}
           />
+          <label
+            className="ca-visible"
+            title="Afficher dans le menu Actions des projets (décoché = réservé aux séquences)"
+          >
+            <input
+              type="checkbox"
+              checked={!a.hidden}
+              onChange={(e) => update(a.id, { hidden: !e.target.checked })}
+            />
+            Projets
+          </label>
           <button
             className="btn btn-ghost btn-sm menu-danger"
             onClick={() => onChange(actions.filter((x) => x.id !== a.id))}

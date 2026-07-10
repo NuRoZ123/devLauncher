@@ -1759,6 +1759,8 @@ function SettingsView({
               Actions (nom + commande) disponibles dans le menu Actions des projets et dans les
               séquences. Les actions de base (npm, tests, nettoyage) sont modifiables et
               supprimables ici. La pastille attribue une couleur au libellé (menu + séquences).
+              Décochez « Projets » pour réserver une action aux séquences (masquée du menu des
+              projets).
             </p>
             <CustomActionManager
               actions={draft.custom_actions}

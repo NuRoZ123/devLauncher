@@ -1168,6 +1168,19 @@ select:focus {
   font-family: "Cascadia Code", "Consolas", monospace;
   font-weight: 700;
 }
+.ca-visible {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ca-visible input {
+  cursor: pointer;
+}
 
 /* Sélecteur de couleur d'action : pastille + popover (palette + perso) */
 .colorpick {

@@ -55,6 +55,8 @@ export interface ActionDef {
   kind?: "bash" | "link" | "restore" | "start" | "stop" | "restart" | "test";
   /** Couleur d'affichage du libellé (dérivée de config.action_colors à l'exécution). */
   color?: string;
+  /** true = action réservée aux séquences : masquée du menu Actions des projets. */
+  hidden?: boolean;
 }
 
 export interface TestResult {

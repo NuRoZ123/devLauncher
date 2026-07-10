@@ -118,8 +118,8 @@ export const ProjectRow = memo(function ProjectRow({
   const startable = project.start_command != null;
   const state = busy ? "busy" : running ? "run" : "stop";
 
-  // Actions / séquences proposées selon le type de projet.
-  const actions = allActions.filter((a) => actionAllowed(a, project));
+  // Actions proposées : compatibles avec le projet et non « réservées aux séquences ».
+  const actions = allActions.filter((a) => actionAllowed(a, project) && !a.hidden);
   // Scripts du package.json du projet → actions « npm run <script> » dédiées.
   const scriptActions: ActionDef[] = (project.scripts ?? []).map((s) => ({
     id: `script:${s}`,
