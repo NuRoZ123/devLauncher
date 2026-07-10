@@ -28,11 +28,15 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      # Node 22 (npm ≥ 10.9) : versions où le crash npm « Exit handler never
+      # called! » est corrigé. Volontairement SANS `cache: npm` : la clé de cache
+      # (hash du lockfile) ne changeait jamais tant que la release n'aboutissait
+      # pas, donc le cache corrompu par le 1er crash était restauré à chaque run
+      # → échec en boucle.
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: npm
+          node-version: 22
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -55,10 +59,26 @@ jobs:
         id: bump
         run: node .github/bump-version.mjs
 
-      # IMPORTANT : npm tourne dans le shell par défaut (PowerShell), PAS sous
-      # Git Bash — npm sous bash sur Windows plante avec « Exit handler never called! ».
+      # Le bug npm « Exit handler never called! » peut laisser node_modules vide
+      # tout en sortant avec le code 0 (step vert, échec « tauri/tsc not
+      # recognized » plus loin). On vérifie donc explicitement que les binaires
+      # sont là ; sinon : purge du cache npm + nouvelle tentative, et échec
+      # franc si la 2e tentative ne suffit pas.
       - name: Install dependencies
-        run: npm ci --no-audit --no-fund
+        run: |
+          node -v; npm -v
+          npm ci --no-audit --no-fund
+          if (-not (Test-Path "node_modules/.bin/tauri.cmd") -or -not (Test-Path "node_modules/.bin/tsc.cmd")) {
+            Write-Host "Install incomplète (bug npm) : purge du cache puis nouvelle tentative..."
+            npm cache clean --force
+            if (Test-Path node_modules) { Remove-Item -Recurse -Force node_modules }
+            npm install --no-audit --no-fund
+          }
+          if (-not (Test-Path "node_modules/.bin/tauri.cmd") -or -not (Test-Path "node_modules/.bin/tsc.cmd")) {
+            Write-Error "node_modules/.bin incomplet après deux tentatives (tauri.cmd / tsc.cmd absents)."
+            exit 1
+          }
+          exit 0
 
       - name: Build (Tauri)
         env:
