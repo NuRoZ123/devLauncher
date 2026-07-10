@@ -65,23 +65,24 @@ jobs:
           echo "Nouvelle version : $NEW"
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --include=dev
 
-      # Action officielle Tauri : installe le CLI, build l'app et publie la release
-      # GitHub (avec les installeurs). Plus fiable que `npm run tauri build`, qui
-      # dépend de la résolution du binaire local (échouait avec « tauri not recognized »).
-      - name: Build & release (Tauri)
-        uses: tauri-apps/tauri-action@v0
+      # Diagnostic : confirme que le CLI Tauri est bien installé par `npm ci`.
+      - name: Check Tauri CLI
+        shell: bash
+        run: |
+          node -v && npm -v
+          npm ls @tauri-apps/cli || true
+          ls -la node_modules/.bin | grep -i tauri || echo "AUCUN binaire tauri dans node_modules/.bin"
+
+      # On invoque le CLI via `npx @tauri-apps/cli` (résolution déterministe du
+      # paquet) plutôt que le script npm `tauri`, dont la résolution du binaire
+      # échouait sur le runner (« tauri is not recognized »).
+      - name: Build (Tauri)
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Injecté dans le frontend : active la vérification de mise à jour (owner/repo).
           VITE_GITHUB_REPO: ${{ github.repository }}
-        with:
-          tagName: v${{ steps.bump.outputs.version }}
-          releaseName: DevLauncher v${{ steps.bump.outputs.version }}
-          releaseBody: "Installeurs Windows en pièces jointes (.msi et -setup.exe)."
-          releaseDraft: false
-          prerelease: false
+        run: npx --yes @tauri-apps/cli build
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -91,6 +92,16 @@ jobs:
             src-tauri/target/release/bundle/nsis/*-setup.exe
             src-tauri/target/release/bundle/msi/*.msi
           if-no-files-found: error
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.bump.outputs.version }}
+          name: DevLauncher v${{ steps.bump.outputs.version }}
+          body: "Installeurs Windows en pièces jointes (.msi et -setup.exe)."
+          files: |
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/msi/*.msi
 
       - name: Commit version bump
         shell: bash
