@@ -1,0 +1,102 @@
+name: Release
+
+# À chaque push sur la branche principale : incrémente la version (patch),
+# construit l'app Windows, publie une release GitHub avec les installeurs et
+# les garde aussi comme artifact du run. L'app interroge ensuite l'API GitHub
+# pour proposer la mise à jour à l'utilisateur.
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Empêche deux releases concurrentes (les bumps de version se marcheraient dessus).
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  # Surcharge le target-dir de src-tauri/.cargo/config.toml (C:/dev/dl-target,
+  # inexistant en CI) par un dossier dans le workspace.
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Bump version (patch)
+        id: bump
+        shell: bash
+        run: |
+          # package.json + package-lock.json (restent synchronisés pour `npm ci`)
+          NEW=$(npm version patch --no-git-tag-version)
+          NEW=${NEW#v}
+          export NEW
+          echo "version=$NEW" >> "$GITHUB_OUTPUT"
+          # tauri.conf.json
+          node -e "const fs=require('fs');const f='src-tauri/tauri.conf.json';const j=JSON.parse(fs.readFileSync(f,'utf8'));j.version=process.env.NEW;fs.writeFileSync(f,JSON.stringify(j,null,2)+'\n')"
+          # Cargo.toml (1re occurrence de version = "...")
+          node -e "const fs=require('fs');const f='src-tauri/Cargo.toml';let s=fs.readFileSync(f,'utf8');s=s.replace(/^version = \".*\"$/m,'version = \"'+process.env.NEW+'\"');fs.writeFileSync(f,s)"
+          echo "Nouvelle version : $NEW"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build (Tauri)
+        env:
+          # Injecté dans le frontend : active la vérification de mise à jour en pointant
+          # sur ce dépôt (owner/repo). Absent en build local → vérification désactivée.
+          VITE_GITHUB_REPO: ${{ github.repository }}
+        run: npm run tauri build
+
+      - name: Commit version bump & tag
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json
+          git commit -m "chore(release): v${{ steps.bump.outputs.version }} [skip ci]"
+          git tag "v${{ steps.bump.outputs.version }}"
+          git push origin "HEAD:${{ github.ref_name }}"
+          git push origin "v${{ steps.bump.outputs.version }}"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DevLauncher-v${{ steps.bump.outputs.version }}
+          path: |
+            target/release/bundle/nsis/*-setup.exe
+            target/release/bundle/msi/*.msi
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.bump.outputs.version }}
+          name: DevLauncher v${{ steps.bump.outputs.version }}
+          files: |
+            target/release/bundle/nsis/*-setup.exe
+            target/release/bundle/msi/*.msi

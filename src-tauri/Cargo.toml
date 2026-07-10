@@ -1,0 +1,42 @@
+[package]
+name = "devlauncher"
+version = "0.1.0"
+description = "Launcher pour les micro-services (Tauri + React)"
+authors = ["SNCF"]
+edition = "2021"
+
+[lib]
+name = "devlauncher_lib"
+# Desktop Windows uniquement : on garde seulement `rlib` (lié au binaire).
+# `cdylib`/`staticlib` (utiles pour le mobile) déclenchent une erreur de linker
+# "export ordinal too large" avec la toolchain GNU + la crate `windows`.
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-autostart = "2"
+serde = { version = "1", features = ["derive"] }
+# preserve_order : conserve l'ordre des clés lors de la réécriture des package.json
+serde_json = { version = "1", features = ["preserve_order"] }
+
+# Accès natif aux process (snapshot parent/enfant, TerminateProcess) : évite de
+# spawner PowerShell/taskkill à chaque kill ou polling de ports.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Threading",
+    "Win32_System_JobObjects",
+    "Win32_Security",
+] }
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

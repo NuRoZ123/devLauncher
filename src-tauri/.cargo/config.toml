@@ -1,0 +1,6 @@
+# La toolchain Rust GNU (windres) ne supporte pas les espaces dans le chemin de
+# build. Le projet étant sous "OneDrive - SNCF\Bureau", on déporte le dossier
+# `target` vers un chemin sans espace. Bonus : OneDrive n'essaie plus de
+# synchroniser les milliers de fichiers de compilation.
+[build]
+target-dir = "C:/dev/dl-target"

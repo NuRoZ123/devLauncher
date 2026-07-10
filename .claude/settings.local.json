@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm --version)",
+      "Bash(rustc --version)",
+      "Bash(cargo --version)",
+      "PowerShell(npx tsc --noEmit 2>&1 | Out-String; \"tsc exit: $LASTEXITCODE\")"
+    ]
+  }
+}
