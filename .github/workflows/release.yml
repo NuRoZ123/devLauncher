@@ -28,15 +28,22 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # Node 22 (npm ≥ 10.9) : versions où le crash npm « Exit handler never
-      # called! » est corrigé. Volontairement SANS `cache: npm` : la clé de cache
-      # (hash du lockfile) ne changeait jamais tant que la release n'aboutissait
-      # pas, donc le cache corrompu par le 1er crash était restauré à chaque run
-      # → échec en boucle.
+      # Volontairement SANS `cache: npm` : la clé de cache (hash du lockfile) ne
+      # changeait jamais tant que la release n'aboutissait pas, donc un état de
+      # cache corrompu était restauré à l'identique à chaque run.
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 22
+
+      # npm (10.8 et 10.9 testés) crashe systématiquement sur ce runner avec
+      # « Exit handler never called! », sur `npm ci` comme `npm install`, même
+      # après purge du cache : bug de npm sur l'image Windows. On installe donc
+      # avec pnpm, dont l'installeur est un code entièrement différent.
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -59,23 +66,15 @@ jobs:
         id: bump
         run: node .github/bump-version.mjs
 
-      # Le bug npm « Exit handler never called! » peut laisser node_modules vide
-      # tout en sortant avec le code 0 (step vert, échec « tauri/tsc not
-      # recognized » plus loin). On vérifie donc explicitement que les binaires
-      # sont là ; sinon : purge du cache npm + nouvelle tentative, et échec
-      # franc si la 2e tentative ne suffit pas.
-      - name: Install dependencies
+      # `pnpm import` convertit package-lock.json en pnpm-lock.yaml : on installe
+      # exactement les mêmes versions qu'en local. Sentinelle : on vérifie que les
+      # binaires attendus existent réellement avant de continuer.
+      - name: Install dependencies (pnpm)
         run: |
-          node -v; npm -v
-          npm ci --no-audit --no-fund
+          pnpm import
+          pnpm install --frozen-lockfile
           if (-not (Test-Path "node_modules/.bin/tauri.cmd") -or -not (Test-Path "node_modules/.bin/tsc.cmd")) {
-            Write-Host "Install incomplète (bug npm) : purge du cache puis nouvelle tentative..."
-            npm cache clean --force
-            if (Test-Path node_modules) { Remove-Item -Recurse -Force node_modules }
-            npm install --no-audit --no-fund
-          }
-          if (-not (Test-Path "node_modules/.bin/tauri.cmd") -or -not (Test-Path "node_modules/.bin/tsc.cmd")) {
-            Write-Error "node_modules/.bin incomplet après deux tentatives (tauri.cmd / tsc.cmd absents)."
+            Write-Error "node_modules/.bin incomplet après pnpm install (tauri.cmd / tsc.cmd absents)."
             exit 1
           }
           exit 0
@@ -84,7 +83,12 @@ jobs:
         env:
           # Injecté dans le frontend : active la vérification de mise à jour (owner/repo).
           VITE_GITHUB_REPO: ${{ github.repository }}
-        run: npm run tauri build
+        run: |
+          # Le beforeBuildCommand commité utilise npm (cassé sur ce runner) : on le
+          # surcharge via un fichier de config CI, SANS toucher au tauri.conf.json
+          # commité (le build local reste 100 % npm).
+          '{"build":{"beforeBuildCommand":"pnpm run build"}}' | Out-File -Encoding utf8 tauri.ci.conf.json
+          pnpm exec tauri build --config tauri.ci.conf.json
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
