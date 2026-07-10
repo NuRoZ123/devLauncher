@@ -64,25 +64,19 @@ jobs:
           node -e "const fs=require('fs');const f='src-tauri/Cargo.toml';let s=fs.readFileSync(f,'utf8');s=s.replace(/^version = \".*\"$/m,'version = \"'+process.env.NEW+'\"');fs.writeFileSync(f,s)"
           echo "Nouvelle version : $NEW"
 
-      - name: Install dependencies
-        run: npm ci --include=dev
-
-      # Diagnostic : confirme que le CLI Tauri est bien installé par `npm ci`.
-      - name: Check Tauri CLI
-        shell: bash
-        run: |
-          node -v && npm -v
-          npm ls @tauri-apps/cli || true
-          ls -la node_modules/.bin | grep -i tauri || echo "AUCUN binaire tauri dans node_modules/.bin"
-
-      # On invoque le CLI via `npx @tauri-apps/cli` (résolution déterministe du
-      # paquet) plutôt que le script npm `tauri`, dont la résolution du binaire
-      # échouait sur le runner (« tauri is not recognized »).
-      - name: Build (Tauri)
+      # Installe les dépendances PUIS build, dans la même étape, pour garantir que
+      # node_modules/.bin (tsc, vite, tauri…) est bien présent au moment du build.
+      # `npm ci` échoue sans package-lock.json → repli sur `npm install`.
+      - name: Install dependencies & build
         env:
           # Injecté dans le frontend : active la vérification de mise à jour (owner/repo).
           VITE_GITHUB_REPO: ${{ github.repository }}
-        run: npx --yes @tauri-apps/cli build
+        shell: bash
+        run: |
+          npm ci || npm install
+          echo "--- node_modules/.bin ---"
+          ls node_modules/.bin | grep -iE 'tsc|vite|tauri' || echo "(bins manquants après install !)"
+          npx --yes @tauri-apps/cli build
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
