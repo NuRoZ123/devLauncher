@@ -18,11 +18,6 @@ concurrency:
   group: release
   cancel-in-progress: false
 
-env:
-  # Surcharge le target-dir de src-tauri/.cargo/config.toml (C:/dev/dl-target,
-  # inexistant en CI) par un dossier dans le workspace.
-  CARGO_TARGET_DIR: ${{ github.workspace }}/target
-
 jobs:
   release:
     runs-on: windows-latest
@@ -46,6 +41,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+
+      # En local le target est déporté vers C:/dev/dl-target (chemin sans espace, car
+      # le projet est sous OneDrive). En CI le workspace n'a pas d'espace : on retire
+      # cette surcharge pour utiliser le target par défaut (src-tauri/target).
+      - name: Use default target dir
+        shell: bash
+        run: rm -f src-tauri/.cargo/config.toml
 
       - name: Bump version (patch)
         id: bump
@@ -88,8 +90,8 @@ jobs:
         with:
           name: DevLauncher-v${{ steps.bump.outputs.version }}
           path: |
-            target/release/bundle/nsis/*-setup.exe
-            target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/msi/*.msi
           if-no-files-found: error
 
       - name: Publish GitHub Release
@@ -98,5 +100,5 @@ jobs:
           tag_name: v${{ steps.bump.outputs.version }}
           name: DevLauncher v${{ steps.bump.outputs.version }}
           files: |
-            target/release/bundle/nsis/*-setup.exe
-            target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/msi/*.msi

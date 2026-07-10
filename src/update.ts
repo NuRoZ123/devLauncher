@@ -1,8 +1,8 @@
 import { getVersion } from "@tauri-apps/api/app";
 
-// Slug "owner/repo" injecté au build par la CI (VITE_GITHUB_REPO). Absent en
-// build local → la vérification de mise à jour est simplement ignorée.
-const REPO = import.meta.env.VITE_GITHUB_REPO;
+// Slug "owner/repo" injecté au build par la CI (VITE_GITHUB_REPO), avec repli sur
+// le dépôt public connu — ainsi les builds locaux vérifient aussi les mises à jour.
+const REPO = import.meta.env.VITE_GITHUB_REPO || "NuRoZ123/devLauncher";
 
 export interface UpdateInfo {
   /** Dernière version publiée (sans le "v"). */

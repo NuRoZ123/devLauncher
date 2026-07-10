@@ -5,3 +5,5 @@ src-tauri/target
 /target
 src-tauri/gen/schemas
 *.log
+.history
+.claude
