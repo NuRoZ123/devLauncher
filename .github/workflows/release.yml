@@ -49,34 +49,22 @@ jobs:
         shell: bash
         run: rm -f src-tauri/.cargo/config.toml
 
+      # Bump en node pur (shell par défaut, aucun npm) : évite le crash
+      # « Exit handler never called! » de npm sous Git Bash sur Windows.
       - name: Bump version (patch)
         id: bump
-        shell: bash
-        run: |
-          # package.json + package-lock.json (restent synchronisés pour `npm ci`)
-          NEW=$(npm version patch --no-git-tag-version)
-          NEW=${NEW#v}
-          export NEW
-          echo "version=$NEW" >> "$GITHUB_OUTPUT"
-          # tauri.conf.json
-          node -e "const fs=require('fs');const f='src-tauri/tauri.conf.json';const j=JSON.parse(fs.readFileSync(f,'utf8'));j.version=process.env.NEW;fs.writeFileSync(f,JSON.stringify(j,null,2)+'\n')"
-          # Cargo.toml (1re occurrence de version = "...")
-          node -e "const fs=require('fs');const f='src-tauri/Cargo.toml';let s=fs.readFileSync(f,'utf8');s=s.replace(/^version = \".*\"$/m,'version = \"'+process.env.NEW+'\"');fs.writeFileSync(f,s)"
-          echo "Nouvelle version : $NEW"
+        run: node .github/bump-version.mjs
 
-      # Installe les dépendances PUIS build, dans la même étape, pour garantir que
-      # node_modules/.bin (tsc, vite, tauri…) est bien présent au moment du build.
-      # `npm ci` échoue sans package-lock.json → repli sur `npm install`.
-      - name: Install dependencies & build
+      # IMPORTANT : npm tourne dans le shell par défaut (PowerShell), PAS sous
+      # Git Bash — npm sous bash sur Windows plante avec « Exit handler never called! ».
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build (Tauri)
         env:
           # Injecté dans le frontend : active la vérification de mise à jour (owner/repo).
           VITE_GITHUB_REPO: ${{ github.repository }}
-        shell: bash
-        run: |
-          npm ci || npm install
-          echo "--- node_modules/.bin ---"
-          ls node_modules/.bin | grep -iE 'tsc|vite|tauri' || echo "(bins manquants après install !)"
-          npx --yes @tauri-apps/cli build
+        run: npm run tauri build
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
