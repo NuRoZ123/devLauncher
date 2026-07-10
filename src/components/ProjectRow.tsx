@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { actionAllowed } from "../constants";
+import { expandActions, isSequenceValid } from "../sequences";
 import type { ActionDef, GitInfo, PortInfo, Project, Sequence, TestResult } from "../types";
 
 interface Props {
@@ -132,12 +133,16 @@ export const ProjectRow = memo(function ProjectRow({
     items: [...actions, ...scriptActions].filter((a) => categoryOf(a) === cat.id),
   })).filter((g) => g.items.length > 0);
 
-  const usableSequences = sequences.filter((s) =>
-    s.actionIds.every((id) => {
-      const a = allActions.find((x) => x.id === id);
-      return !a || actionAllowed(a, project);
-    }),
-  );
+  // Séquences proposées : valides+applicables (jouables), ou invalides (une action/
+  // séquence a été supprimée → affichées désactivées pour signaler le problème).
+  const menuSequences = sequences
+    .map((s) => {
+      const valid = isSequenceValid(s, allActions, sequences);
+      const applicable =
+        valid && expandActions(s, allActions, sequences).every((a) => actionAllowed(a, project));
+      return { seq: s, valid, applicable };
+    })
+    .filter((x) => !x.valid || x.applicable);
 
   const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(DEFAULT_COLLAPSED);
@@ -497,7 +502,7 @@ export const ProjectRow = memo(function ProjectRow({
               );
             })}
 
-            {usableSequences.length > 0 &&
+            {menuSequences.length > 0 &&
               (() => {
                 const open = !collapsed.has("sequences");
                 return (
@@ -505,23 +510,34 @@ export const ProjectRow = memo(function ProjectRow({
                     <button className="menu-head" onClick={() => toggleCat("sequences")}>
                       <span className={"menu-chevron" + (open ? " open" : "")}>▸</span>
                       <span className="menu-head-label">Séquences</span>
-                      <span className="menu-count">{usableSequences.length}</span>
+                      <span className="menu-count">{menuSequences.length}</span>
                     </button>
                     {open && (
                       <div className="menu-items">
-                        {usableSequences.map((s) => (
-                          <button
-                            key={s.id}
-                            className="menu-item menu-seq"
-                            style={s.color ? ({ "--item-color": s.color } as React.CSSProperties) : undefined}
-                            onClick={() => {
-                              close();
-                              onSequence(project, s);
-                            }}
-                          >
-                            ⛓ {s.name}
-                          </button>
-                        ))}
+                        {menuSequences.map(({ seq, valid }) =>
+                          valid ? (
+                            <button
+                              key={seq.id}
+                              className="menu-item menu-seq"
+                              style={seq.color ? ({ "--item-color": seq.color } as React.CSSProperties) : undefined}
+                              onClick={() => {
+                                close();
+                                onSequence(project, seq);
+                              }}
+                            >
+                              ⛓ {seq.name}
+                            </button>
+                          ) : (
+                            <button
+                              key={seq.id}
+                              className="menu-item menu-seq menu-item-invalid"
+                              disabled
+                              title="Séquence invalide : une action ou séquence a été supprimée"
+                            >
+                              ⚠ {seq.name}
+                            </button>
+                          ),
+                        )}
                       </div>
                     )}
                   </div>

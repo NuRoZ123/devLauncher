@@ -1,24 +1,34 @@
 import { useEffect, useState } from "react";
-import { findAction } from "../constants";
-import type { Project, Sequence } from "../types";
+import { expandActions, resolveStep } from "../sequences";
+import type { ActionDef, Project, Sequence } from "../types";
 
 interface Props {
   sequence: Sequence;
   projects: Project[];
-  colors: Record<string, string>;
+  actions: ActionDef[];
+  sequences: Sequence[];
   onRun: (targetIds: string[], branch: string) => void;
   onClose: () => void;
 }
 
-export function GeneralSequenceModal({ sequence, projects, colors, onRun, onClose }: Props) {
+export function GeneralSequenceModal({
+  sequence,
+  projects,
+  actions,
+  sequences,
+  onRun,
+  onClose,
+}: Props) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  const steps = sequence.actionIds.map((id) => findAction(id)).filter(Boolean);
-  const needsBranch = steps.some((a) => a?.needsBranch);
+  // Étapes affichées (actions + sous-séquences), et actions aplaties pour détecter
+  // le besoin de branche.
+  const steps = sequence.actionIds.map((ref) => resolveStep(ref, actions, sequences));
+  const needsBranch = expandActions(sequence, actions, sequences).some((a) => a.needsBranch);
   const [branch, setBranch] = useState("");
 
   // Cibles définies à la création, résolues vers les projets existants.
@@ -41,10 +51,14 @@ export function GeneralSequenceModal({ sequence, projects, colors, onRun, onClos
         </div>
 
         <div className="gseq-steps">
-          {steps.map((a, i) => (
-            <span className="gseq-step" key={i}>
+          {steps.map((step, i) => (
+            <span className={"gseq-step" + (step.valid ? "" : " gseq-step-invalid")} key={i}>
               <span className="gseq-step-num">{i + 1}</span>
-              <span style={a && colors[a.id] ? { color: colors[a.id] } : undefined}>{a?.label}</span>
+              <span style={step.valid && step.color ? { color: step.color } : undefined}>
+                {step.kind === "sequence" ? "⛓ " : ""}
+                {step.label}
+                {!step.valid && " (supprimée)"}
+              </span>
             </span>
           ))}
         </div>

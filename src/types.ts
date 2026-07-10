@@ -83,10 +83,14 @@ export interface QJob {
   cancellable: boolean;
 }
 
-/** Une séquence = un enchaînement ordonné d'actions. */
+/** Une séquence = un enchaînement ordonné d'étapes. */
 export interface Sequence {
   id: string;
   name: string;
+  /**
+   * Étapes ordonnées : id d'action, ou référence à une autre séquence préfixée
+   * par "seq:" (séquences générales). Voir `src/sequences.ts`.
+   */
   actionIds: string[];
   /** true = séquence générale, jouable sur plusieurs services à la fois. */
   global?: boolean;

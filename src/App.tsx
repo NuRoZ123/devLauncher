@@ -22,6 +22,7 @@ import {
 } from "./constants";
 import { GeneralSequenceModal } from "./components/GeneralSequenceModal";
 import { checkForUpdate, type UpdateInfo } from "./update";
+import { expandActions, isSequenceValid } from "./sequences";
 import type {
   ActionDef,
   Config,
@@ -798,10 +799,10 @@ export default function App() {
 
   const runSequenceOn = useCallback(
     async (p: Project, seq: Sequence) => {
+      if (!isSequenceValid(seq, allActions, sequences)) return; // séquence invalide : on ne joue pas
       const plan: StepPlan[] = [];
-      for (const aid of seq.actionIds) {
-        const a = resolveAction(aid);
-        if (!a || !actionAllowed(a, p)) continue;
+      for (const a of expandActions(seq, allActions, sequences)) {
+        if (!actionAllowed(a, p)) continue;
         let branch: string | undefined;
         if (a.needsBranch) {
           const b = await askBranch(p);
@@ -815,7 +816,7 @@ export default function App() {
       setJobs((js) => [job, ...js]);
       await chain(job, p, plan);
     },
-    [askBranch, chain, resolveAction],
+    [askBranch, chain, allActions, sequences],
   );
 
   const cancelStep = useCallback((jobId: string, stepId: string) => {
@@ -1024,13 +1025,14 @@ export default function App() {
   // ----- Séquences générales (multi-services) -----
   const runGeneralSequence = useCallback(
     async (seq: Sequence, targetIds: string[], branch: string) => {
+      if (!isSequenceValid(seq, allActions, sequences)) return; // séquence invalide : on ne joue pas
+      const expanded = expandActions(seq, allActions, sequences);
       const targets = projects.filter((p) => targetIds.includes(p.id));
       const built = targets
         .map((p) => {
           const plan: StepPlan[] = [];
-          for (const aid of seq.actionIds) {
-            const a = resolveAction(aid);
-            if (!a || !actionAllowed(a, p)) continue;
+          for (const a of expanded) {
+            if (!actionAllowed(a, p)) continue;
             if (a.needsBranch && !branch) continue;
             plan.push({ action: a, branch: a.needsBranch ? branch : undefined });
           }
@@ -1042,7 +1044,7 @@ export default function App() {
       // chaque projet s'exécute dans sa propre file (en parallèle entre projets)
       built.forEach((b) => chain(b.job, b.project, b.plan));
     },
-    [projects, chain, resolveAction],
+    [projects, chain, allActions, sequences],
   );
 
   // ----- Actions globales -----
@@ -1272,19 +1274,30 @@ export default function App() {
                       Aucune. Créez-en une dans ⚙ Réglages (case « Générale »).
                     </div>
                   )}
-                  {globalSequences.map((s) => (
-                    <button
-                      key={s.id}
-                      className="menu-item menu-seq"
-                      style={s.color ? ({ "--item-color": s.color } as React.CSSProperties) : undefined}
-                      onClick={() => {
-                        setSeqMenuOpen(false);
-                        setGeneralSeq(s);
-                      }}
-                    >
-                      ⛓ {s.name}
-                    </button>
-                  ))}
+                  {globalSequences.map((s) =>
+                    isSequenceValid(s, allActions, sequences) ? (
+                      <button
+                        key={s.id}
+                        className="menu-item menu-seq"
+                        style={s.color ? ({ "--item-color": s.color } as React.CSSProperties) : undefined}
+                        onClick={() => {
+                          setSeqMenuOpen(false);
+                          setGeneralSeq(s);
+                        }}
+                      >
+                        ⛓ {s.name}
+                      </button>
+                    ) : (
+                      <button
+                        key={s.id}
+                        className="menu-item menu-seq menu-item-invalid"
+                        disabled
+                        title="Séquence invalide : une action ou séquence a été supprimée"
+                      >
+                        ⚠ {s.name}
+                      </button>
+                    ),
+                  )}
                 </div>
               </>
             )}
@@ -1435,7 +1448,8 @@ export default function App() {
         <GeneralSequenceModal
           sequence={generalSeq}
           projects={projects}
-          colors={actionColors}
+          actions={allActions}
+          sequences={sequences}
           onRun={(ids, branch) => {
             const seq = generalSeq;
             setGeneralSeq(null);
@@ -1797,7 +1811,7 @@ function SettingsView({
             <p className="muted">
               {seqTab === "project"
                 ? "Jouées depuis le menu Actions d'un projet. Elles s'arrêtent si une action échoue."
-                : "Jouées depuis le menu ⛓ Séquences. Choisissez ici les projets cibles."}
+                : "Jouées depuis le menu ⛓ Séquences, sur plusieurs projets à la fois. Une étape peut être une action ou une séquence existante. Choisissez ici les projets cibles."}
             </p>
             <SequenceManager
               sequences={draft.sequences}

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { ActionDef, Project, ProjectKind, Sequence } from "../types";
+import { isSequenceValid, resolveStep, seqRef } from "../sequences";
 import { ColorPicker } from "./ColorPicker";
 
 interface Props {
@@ -17,11 +18,11 @@ const KIND_LABEL: Record<ProjectKind, string> = {
 };
 
 export function SequenceManager({ sequences, mode, projects, actions, onChange }: Props) {
-  const actionLabel = (id: string) => actions.find((a) => a.id === id)?.label ?? id;
-  const actionColor = (id: string) => actions.find((a) => a.id === id)?.color;
   const [newName, setNewName] = useState("");
   const isGeneral = mode === "general";
   const list = sequences.filter((s) => !!s.global === isGeneral);
+  // Séquences (par projet) référençables comme étape d'une séquence générale.
+  const refSequences = sequences.filter((s) => !s.global);
 
   function update(id: string, patch: Partial<Sequence>) {
     onChange(sequences.map((s) => (s.id === id ? { ...s, ...patch } : s)));
@@ -74,8 +75,9 @@ export function SequenceManager({ sequences, mode, projects, actions, onChange }
 
       {list.map((s) => {
         const allChecked = (s.targets?.length ?? 0) === projects.length && projects.length > 0;
+        const valid = isSequenceValid(s, actions, sequences);
         return (
-          <div className="seq-card" key={s.id}>
+          <div className={"seq-card" + (valid ? "" : " seq-invalid")} key={s.id}>
             <div className="seq-head">
               <ColorPicker value={s.color} onChange={(c) => update(s.id, { color: c || undefined })} />
               <input
@@ -84,6 +86,11 @@ export function SequenceManager({ sequences, mode, projects, actions, onChange }
                 value={s.name}
                 onChange={(e) => update(s.id, { name: e.target.value })}
               />
+              {!valid && (
+                <span className="seq-invalid-badge" title="Une action ou séquence de cette séquence a été supprimée">
+                  ⚠ invalide
+                </span>
+              )}
               <button
                 className="btn btn-ghost btn-sm menu-danger"
                 onClick={() => onChange(sequences.filter((x) => x.id !== s.id))}
@@ -94,33 +101,43 @@ export function SequenceManager({ sequences, mode, projects, actions, onChange }
 
             <div className="seq-steps">
               {s.actionIds.length === 0 && (
-                <span className="muted">Aucune action — ajoutez-en une.</span>
+                <span className="muted">Aucune étape — ajoutez-en une.</span>
               )}
-              {s.actionIds.map((aid, i) => (
-                <div className="seq-step" key={i}>
-                  <span className="seq-step-num">{i + 1}</span>
-                  <span className="seq-step-label" style={{ color: actionColor(aid) }}>
-                    {actionLabel(aid)}
-                  </span>
-                  <span className="seq-step-tools">
-                    <button className="icon-btn" title="Monter" onClick={() => move(s, i, -1)}>
-                      ↑
-                    </button>
-                    <button className="icon-btn" title="Descendre" onClick={() => move(s, i, 1)}>
-                      ↓
-                    </button>
-                    <button
-                      className="icon-btn"
-                      title="Retirer"
-                      onClick={() =>
-                        update(s.id, { actionIds: s.actionIds.filter((_, k) => k !== i) })
-                      }
-                    >
-                      ×
-                    </button>
-                  </span>
-                </div>
-              ))}
+              {s.actionIds.map((ref, i) => {
+                const step = resolveStep(ref, actions, sequences);
+                return (
+                  <div className={"seq-step" + (step.valid ? "" : " seq-step-invalid")} key={i}>
+                    <span className="seq-step-num">{i + 1}</span>
+                    <span className="seq-step-label" style={{ color: step.valid ? step.color : undefined }}>
+                      {step.kind === "sequence" && <span className="seq-step-ico">⛓ </span>}
+                      {step.label}
+                      {!step.valid && (
+                        <span className="seq-step-warn">
+                          {" "}
+                          — {step.kind === "sequence" ? "séquence" : "action"} supprimée
+                        </span>
+                      )}
+                    </span>
+                    <span className="seq-step-tools">
+                      <button className="icon-btn" title="Monter" onClick={() => move(s, i, -1)}>
+                        ↑
+                      </button>
+                      <button className="icon-btn" title="Descendre" onClick={() => move(s, i, 1)}>
+                        ↓
+                      </button>
+                      <button
+                        className="icon-btn"
+                        title="Retirer"
+                        onClick={() =>
+                          update(s.id, { actionIds: s.actionIds.filter((_, k) => k !== i) })
+                        }
+                      >
+                        ×
+                      </button>
+                    </span>
+                  </div>
+                );
+              })}
             </div>
 
             <div className="seq-addstep">
@@ -131,12 +148,23 @@ export function SequenceManager({ sequences, mode, projects, actions, onChange }
                   update(s.id, { actionIds: [...s.actionIds, e.target.value] });
                 }}
               >
-                <option value="">+ Ajouter une action…</option>
-                {actions.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.label}
-                  </option>
-                ))}
+                <option value="">+ Ajouter une étape…</option>
+                <optgroup label="Actions">
+                  {actions.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.label}
+                    </option>
+                  ))}
+                </optgroup>
+                {isGeneral && refSequences.length > 0 && (
+                  <optgroup label="Séquences">
+                    {refSequences.map((seq) => (
+                      <option key={seq.id} value={seqRef(seq.id)}>
+                        ⛓ {seq.name}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
               </select>
             </div>
 
