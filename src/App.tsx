@@ -92,6 +92,20 @@ export default function App() {
     jobsRef.current = jobs;
   }, [jobs]);
 
+  // Échap ferme le menu des tâches, puis la page réglages.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (jobsOpen) {
+        setJobsOpen(false);
+      } else if (view === "settings") {
+        setView("dashboard");
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [jobsOpen, view]);
+
   // Trace une opération non annulable (scan, libération de port…) dans la file.
   const track = useCallback(
     async <T,>(title: string, projectName: string, run: () => Promise<T>): Promise<T> => {
@@ -1607,6 +1621,9 @@ function SettingsView({
   return (
     <div className="settings">
       <div className="settings-inner">
+        <button className="tab-close settings-close" onClick={onClose} title="Fermer">
+          ×
+        </button>
         <div className="tabs settings-tabs">
           {SETTINGS_TABS.map((t) => (
             <button

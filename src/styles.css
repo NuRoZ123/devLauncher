@@ -986,6 +986,13 @@ select:focus {
 .settings-inner {
   max-width: 760px;
   margin: 0 auto;
+  position: relative;
+}
+.settings-close {
+  position: absolute;
+  top: 4px;
+  right: 0;
+  z-index: 3;
 }
 .settings h2 {
   font-size: 15px;
@@ -1601,6 +1608,12 @@ select:focus {
 }
 
 /* ---------------- File de tâches (drawer) ---------------- */
+.taskq-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 149;
+  background: transparent;
+}
 .taskq {
   position: fixed;
   top: 0;

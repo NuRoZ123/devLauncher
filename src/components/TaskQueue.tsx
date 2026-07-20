@@ -24,7 +24,9 @@ export function TaskQueue({ jobs, onCancelJob, onCancelStep, onClear, onClose }:
   const hasFinished = jobs.some((j) => !active(j.status));
 
   return (
-    <div className="taskq">
+    <>
+      <div className="taskq-backdrop" onClick={onClose} />
+      <div className="taskq">
       <div className="taskq-head">
         <h3>Tâches</h3>
         <div className="taskq-head-actions">
@@ -81,6 +83,7 @@ export function TaskQueue({ jobs, onCancelJob, onCancelStep, onClear, onClose }:
           </div>
         ))}
       </div>
-    </div>
+      </div>
+    </>
   );
 }
