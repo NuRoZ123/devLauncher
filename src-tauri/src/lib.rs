@@ -563,6 +563,61 @@ fn open_url(url: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Télécharge un fichier (installeur de mise à jour) dans le dossier
+/// Téléchargements de l'utilisateur, sans passer par le navigateur.
+/// Renvoie le chemin complet du fichier écrit.
+#[tauri::command]
+async fn download_file(app: AppHandle, url: String, filename: String) -> Result<String, String> {
+    // Garde-fous : uniquement du HTTPS, et un nom de fichier sans chemin.
+    if !url.starts_with("https://") {
+        return Err("URL invalide (HTTPS requis)".into());
+    }
+    if filename.is_empty()
+        || filename.contains('/')
+        || filename.contains('\\')
+        || filename.contains("..")
+    {
+        return Err("Nom de fichier invalide".into());
+    }
+    let dir = app
+        .path()
+        .download_dir()
+        .map_err(|e| format!("Dossier Téléchargements introuvable : {e}"))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let dest = dir.join(&filename);
+        let resp = ureq::get(&url)
+            .set("User-Agent", "DevLauncher")
+            .call()
+            .map_err(|e| format!("Téléchargement échoué : {e}"))?;
+        let mut reader = resp.into_reader();
+        // Écriture dans un fichier temporaire puis renommage : pas de fichier
+        // partiel exploitable si le téléchargement est interrompu.
+        let tmp = dir.join(format!("{filename}.part"));
+        let mut out = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+        std::io::copy(&mut reader, &mut out).map_err(|e| format!("Écriture échouée : {e}"))?;
+        drop(out);
+        let _ = std::fs::remove_file(&dest);
+        std::fs::rename(&tmp, &dest).map_err(|e| format!("Renommage échoué : {e}"))?;
+        Ok(dest.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Ouvre l'explorateur sur un fichier (le sélectionne dans son dossier).
+#[tauri::command]
+fn reveal_path(path: String) -> Result<(), String> {
+    if !Path::new(&path).exists() {
+        return Err("Fichier introuvable".into());
+    }
+    std::process::Command::new("explorer")
+        .arg(format!("/select,{path}"))
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 fn save_config(app: AppHandle, config: Config) -> Result<(), String> {
     let p = config_path(&app)?;
@@ -3096,6 +3151,8 @@ pub fn run() {
             ports_status,
             free_port,
             open_url,
+            download_file,
+            reveal_path,
             db_connect,
             db_tables,
             db_table_rows,

@@ -23,6 +23,10 @@ serde = { version = "1", features = ["derive"] }
 # preserve_order : conserve l'ordre des clés lors de la réécriture des package.json
 serde_json = { version = "1", features = ["preserve_order"] }
 
+# Téléchargement des installeurs de mise à jour (TLS 100 % Rust via rustls :
+# pas d'OpenSSL, compatible toolchain GNU).
+ureq = "2"
+
 # Connexion aux bases de données des services (test de connexion).
 # Pilotes 100 % Rust, sans TLS (dev local) : évite OpenSSL, compatible toolchain GNU.
 postgres = "0.19"

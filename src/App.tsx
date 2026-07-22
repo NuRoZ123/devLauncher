@@ -24,7 +24,7 @@ import {
   START_COMMAND_PLACEHOLDER,
 } from "./constants";
 import { GeneralSequenceModal } from "./components/GeneralSequenceModal";
-import { checkForUpdate, type UpdateInfo } from "./update";
+import { checkForUpdate, type UpdateAsset, type UpdateInfo } from "./update";
 import { expandActions, isSequenceValid } from "./sequences";
 import { parseEnv } from "./env";
 import type {
@@ -109,6 +109,8 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const [updateDismissed, setUpdateDismissed] = useState(false);
+  /** Téléchargement de l'installeur : nom en cours, chemin final, ou erreur. */
+  const [dl, setDl] = useState<{ busy?: string; done?: string; error?: string }>({});
   const [view, setView] = useState<"dashboard" | "settings">("dashboard");
 
   const [projects, setProjects] = useState<Project[]>([]);
@@ -1726,8 +1728,18 @@ export default function App() {
   const serviceSequences = useMemo(() => sequences.filter((s) => !s.global), [sequences]);
   const globalSequences = useMemo(() => sequences.filter((s) => !!s.global), [sequences]);
 
+  // Télécharge un installeur de mise à jour sans ouvrir le navigateur.
+  const downloadUpdate = useCallback(async (asset: UpdateAsset) => {
+    setDl({ busy: asset.name });
+    try {
+      const path = await api.downloadFile(asset.url, asset.name);
+      setDl({ done: path });
+    } catch (e) {
+      setDl({ error: String(e) });
+    }
+  }, []);
+
   const runningCount = running.size;
-  const startableCount = projects.filter((p) => p.start_command).length;
   const canStartAny = projects.some(
     (p) => p.start_command && !running.has(p.id) && !busy[p.id],
   );
@@ -1755,9 +1767,49 @@ export default function App() {
             <span className="update-cur"> (installée : v{update.current})</span>
           </span>
           <span className="update-actions">
-            <button className="btn btn-primary btn-sm" onClick={() => api.openUrl(update.url)}>
-              Télécharger
-            </button>
+            {dl.done ? (
+              <>
+                <span className="update-done" title={dl.done}>
+                  ✓ Téléchargé dans Téléchargements
+                </span>
+                <button
+                  className="btn btn-primary btn-sm"
+                  onClick={() => api.revealPath(dl.done!)}
+                  title={dl.done}
+                >
+                  Ouvrir le dossier
+                </button>
+              </>
+            ) : (
+              <>
+                {dl.error && <span className="update-err">{dl.error}</span>}
+                {update.msi || update.exe ? (
+                  ([update.msi, update.exe].filter(Boolean) as UpdateAsset[]).map((a) => (
+                    <button
+                      key={a.name}
+                      className="btn btn-primary btn-sm"
+                      disabled={!!dl.busy}
+                      onClick={() => downloadUpdate(a)}
+                      title={`${a.name}${a.size ? ` — ${(a.size / 1048576).toFixed(1)} Mo` : ""}`}
+                    >
+                      {dl.busy === a.name ? (
+                        <span className="spinner spinner-xs" />
+                      ) : (
+                        `⬇ ${a.name.toLowerCase().endsWith(".msi") ? ".msi" : ".exe"}`
+                      )}
+                    </button>
+                  ))
+                ) : (
+                  <button
+                    className="btn btn-primary btn-sm"
+                    onClick={() => api.openUrl(update.url)}
+                    title="Aucun installeur trouvé : ouvrir la page de la release"
+                  >
+                    Télécharger
+                  </button>
+                )}
+              </>
+            )}
             <button
               className="btn btn-ghost btn-sm"
               onClick={() => setUpdateDismissed(true)}
@@ -1772,12 +1824,11 @@ export default function App() {
         <div className="brand">
           <span className="brand-logo">⚡</span>
           <span className="brand-name">DevLauncher</span>
+          <span className="brand-version" title={`Version ${__APP_VERSION__}`}>
+            v{__APP_VERSION__}
+          </span>
         </div>
         <div className="topbar-stats">
-          <span className="stat">
-            <b>{runningCount}</b>/{startableCount} actifs
-          </span>
-          <span className="stat muted">{projects.length} projets</span>
           {scanning && (
             <span className="stat scanning">
               <span className="spinner" /> analyse…

@@ -52,6 +52,12 @@ export const api = {
 
   openUrl: (url: string) => invoke<void>("open_url", { url }),
 
+  /** Télécharge un fichier dans le dossier Téléchargements ; renvoie son chemin. */
+  downloadFile: (url: string, filename: string) =>
+    invoke<string>("download_file", { url, filename }),
+  /** Ouvre l'explorateur en sélectionnant le fichier. */
+  revealPath: (path: string) => invoke<void>("reveal_path", { path }),
+
   readPackageJson: (path: string) => invoke<PkgMeta>("read_package_json", { path }),
   readEnv: (path: string) => invoke<string>("read_env", { path }),
   saveEnv: (path: string, content: string) =>

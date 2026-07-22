@@ -301,6 +301,29 @@ input[type="checkbox"]:disabled {
 .brand-logo {
   font-size: 18px;
 }
+/* Version de l'app, discrète à côté du nom. */
+.update-done {
+  font-size: 12px;
+  color: var(--green);
+  white-space: nowrap;
+}
+.update-err {
+  font-size: 12px;
+  color: #ff9c95;
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.brand-version {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+  margin-left: -3px;
+  align-self: center;
+  padding-top: 2px;
+}
 .topbar-stats {
   display: flex;
   gap: 14px;

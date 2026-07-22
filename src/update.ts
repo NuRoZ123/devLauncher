@@ -4,13 +4,25 @@ import { getVersion } from "@tauri-apps/api/app";
 // le dépôt public connu — ainsi les builds locaux vérifient aussi les mises à jour.
 const REPO = import.meta.env.VITE_GITHUB_REPO || "NuRoZ123/devLauncher";
 
+/** Un installeur publié avec la release. */
+export interface UpdateAsset {
+  name: string;
+  url: string;
+  /** Taille en octets (0 si inconnue). */
+  size: number;
+}
+
 export interface UpdateInfo {
   /** Dernière version publiée (sans le "v"). */
   version: string;
   /** Version actuellement installée. */
   current: string;
-  /** Page de la release sur GitHub. */
+  /** Page de la release sur GitHub (repli si aucun installeur trouvé). */
   url: string;
+  /** Installeur MSI de la release, si publié. */
+  msi?: UpdateAsset;
+  /** Installeur NSIS (.exe) de la release, si publié. */
+  exe?: UpdateAsset;
 }
 
 // Compare deux versions "a.b.c" : vrai si `latest` est strictement plus récente.
@@ -41,13 +53,25 @@ export async function checkForUpdate(): Promise<UpdateInfo | null> {
       headers: { Accept: "application/vnd.github+json" },
     });
     if (!res.ok) return null;
-    const data = (await res.json()) as { tag_name?: string; html_url?: string };
+    const data = (await res.json()) as {
+      tag_name?: string;
+      html_url?: string;
+      assets?: { name?: string; browser_download_url?: string; size?: number }[];
+    };
     const latest = (data.tag_name ?? "").replace(/^v/, "");
     if (!latest || !isNewer(latest, current)) return null;
+    // Installeurs publiés par la CI : on les télécharge directement.
+    const assets = data.assets ?? [];
+    const pick = (re: RegExp): UpdateAsset | undefined => {
+      const a = assets.find((x) => x.name && x.browser_download_url && re.test(x.name));
+      return a ? { name: a.name!, url: a.browser_download_url!, size: a.size ?? 0 } : undefined;
+    };
     return {
       version: latest,
       current,
       url: data.html_url ?? `https://github.com/${REPO}/releases/latest`,
+      msi: pick(/\.msi$/i),
+      exe: pick(/\.exe$/i),
     };
   } catch {
     return null;
