@@ -4,7 +4,10 @@
       "Bash(npm --version)",
       "Bash(rustc --version)",
       "Bash(cargo --version)",
-      "PowerShell(npx tsc --noEmit 2>&1 | Out-String; \"tsc exit: $LASTEXITCODE\")"
+      "PowerShell(npx tsc --noEmit 2>&1 | Out-String; \"tsc exit: $LASTEXITCODE\")",
+      "Bash(npx tsc *)",
+      "Bash(npm run *)",
+      "Bash(cargo check *)"
     ]
   }
 }

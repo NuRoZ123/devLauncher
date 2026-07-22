@@ -9,6 +9,9 @@ import { open } from "@tauri-apps/plugin-dialog";
 import type {
   BranchInfo,
   Config,
+  DbDriver,
+  DbRowUpdate,
+  DbTableData,
   GitInfo,
   LogLine,
   PkgMeta,
@@ -55,6 +58,137 @@ export const api = {
     invoke<void>("save_env", { path, content }),
   packageLinks: (root: string, depName: string) =>
     invoke<ServiceDep[]>("package_links", { root, depName }),
+
+  /** Teste une connexion BDD (valeurs résolues depuis le .env). Renvoie la
+   *  version du serveur si OK, rejette avec un message sinon. */
+  dbConnect: (
+    driver: DbDriver,
+    host: string,
+    port: number,
+    user: string,
+    password: string,
+    database: string,
+  ) =>
+    invoke<string>("db_connect", { driver, host, port, user, password, database }),
+
+  /** Liste les tables de la base (valeurs résolues depuis le .env). */
+  dbTables: (
+    driver: DbDriver,
+    host: string,
+    port: number,
+    user: string,
+    password: string,
+    database: string,
+  ) =>
+    invoke<string[]>("db_tables", { driver, host, port, user, password, database }),
+
+  /** Lit les premières lignes d'une table (bornées par `limit`). */
+  dbTableRows: (
+    driver: DbDriver,
+    host: string,
+    port: number,
+    user: string,
+    password: string,
+    database: string,
+    table: string,
+    limit: number,
+    offset: number,
+    filter: string,
+  ) =>
+    invoke<DbTableData>("db_table_rows", {
+      driver,
+      host,
+      port,
+      user,
+      password,
+      database,
+      table,
+      limit,
+      offset,
+      filter,
+    }),
+
+  /** Supprime les lignes sélectionnées (identifiées par leur clé primaire).
+   *  `rows` = valeurs de cellules (texte) alignées sur `columns`. */
+  dbDeleteRows: (
+    driver: DbDriver,
+    host: string,
+    port: number,
+    user: string,
+    password: string,
+    database: string,
+    table: string,
+    columns: string[],
+    rows: (string | null)[][],
+  ) =>
+    invoke<number>("db_delete_rows", {
+      driver,
+      host,
+      port,
+      user,
+      password,
+      database,
+      table,
+      columns,
+      rows,
+    }),
+
+  /** Modifie une cellule (SET column = value WHERE clé primaire de la ligne).
+   *  `row` = valeurs de la ligne (texte) pour identifier la ligne par sa PK. */
+  dbUpdateCell: (
+    driver: DbDriver,
+    host: string,
+    port: number,
+    user: string,
+    password: string,
+    database: string,
+    table: string,
+    columns: string[],
+    row: (string | null)[],
+    column: string,
+    value: string,
+  ) =>
+    invoke<number>("db_update_cell", {
+      driver,
+      host,
+      port,
+      user,
+      password,
+      database,
+      table,
+      columns,
+      row,
+      column,
+      value,
+    }),
+
+  /** Applique en une transaction les modifications + suppressions en attente. */
+  dbApplyChanges: (
+    driver: DbDriver,
+    host: string,
+    port: number,
+    user: string,
+    password: string,
+    database: string,
+    table: string,
+    columns: string[],
+    inserts: { column: string; value: string | null }[][],
+    updates: DbRowUpdate[],
+    deletes: (string | null)[][],
+  ) =>
+    invoke<{ inserted: number; updated: number; deleted: number }>("db_apply_changes", {
+      driver,
+      host,
+      port,
+      user,
+      password,
+      database,
+      table,
+      columns,
+      inserts,
+      updates,
+      deletes,
+    }),
   setDepVersion: (servicePath: string, depName: string, value: string) =>
     invoke<void>("set_dep_version", { servicePath, depName, value }),
 };

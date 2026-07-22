@@ -102,6 +102,60 @@ export interface Sequence {
   color?: string;
 }
 
+export type DbDriver = "mariadb" | "postgres";
+
+/**
+ * Connexion BDD d'un service : uniquement les *noms de clés* du .env pour
+ * chaque champ (aucun identifiant stocké). À la réouverture, on relit le .env
+ * pour résoudre les valeurs et se reconnecter.
+ */
+export interface DbConnection {
+  driver: DbDriver;
+  hostKey: string;
+  portKey: string;
+  userKey: string;
+  passwordKey: string;
+  databaseKey: string;
+  /**
+   * true = la dernière tentative de connexion (au dernier enregistrement de ce
+   * mapping) a réussi. Sert à colorer le bouton BDD. Repart à false dès que le
+   * mapping est ré-enregistré sans succès.
+   */
+  verified?: boolean;
+}
+
+/** Éditeur adapté à une colonne pour la modification en place. */
+export type DbEditor = "text" | "number" | "bool" | "enum" | "date" | "time" | "datetime";
+
+/** Référence de clé étrangère : table + colonne cibles. */
+export interface DbFkRef {
+  table: string;
+  column: string;
+}
+
+/** Une ligne à modifier : `row` (valeurs actuelles, pour la clé primaire) +
+ *  `sets` = colonnes à changer (valeur `null` = NULL SQL). */
+export interface DbRowUpdate {
+  row: (string | null)[];
+  sets: { column: string; value: string | null }[];
+}
+
+/** Contenu d'un aperçu de table : colonnes + types SQL + lignes (nullables). */
+export interface DbTableData {
+  columns: string[];
+  /** Type SQL de chaque colonne, aligné sur `columns` (ex. "int4", "varchar"). */
+  types: string[];
+  /** Éditeur adapté par colonne, aligné sur `columns`. */
+  editors: DbEditor[];
+  /** Valeurs possibles par colonne enum (vide sinon), aligné sur `columns`. */
+  enums: string[][];
+  /** Colonne obligatoire à l'insertion (NOT NULL sans défaut/auto), aligné. */
+  required: boolean[];
+  /** Clé étrangère par colonne (null sinon), aligné sur `columns`. */
+  fks: (DbFkRef | null)[];
+  rows: (string | null)[][];
+}
+
 export interface Config {
   projects_root: string;
   git_bash_path: string;
@@ -115,6 +169,12 @@ export interface Config {
   action_colors: Record<string, string>;
   /** Vrai une fois les actions par défaut semées (évite leur réapparition). */
   actions_seeded: boolean;
+  /** Connexions BDD par service : id de projet → mapping des clés .env. */
+  db_connections: Record<string, DbConnection>;
+  /** Nombre de lignes affichées par défaut dans l'aperçu d'une table. */
+  db_row_limit: number;
+  /** Services déclarés sans base de données : bouton BDD masqué. */
+  db_disabled: Record<string, boolean>;
 }
 
 export interface PkgMeta {

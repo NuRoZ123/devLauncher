@@ -1,6 +1,6 @@
 [package]
 name = "devlauncher"
-version = "0.1.5"
+version = "1.0.0"
 description = "Launcher pour les micro-services (Tauri + React)"
 authors = ["SNCF"]
 edition = "2021"
@@ -22,6 +22,11 @@ tauri-plugin-autostart = "2"
 serde = { version = "1", features = ["derive"] }
 # preserve_order : conserve l'ordre des clés lors de la réécriture des package.json
 serde_json = { version = "1", features = ["preserve_order"] }
+
+# Connexion aux bases de données des services (test de connexion).
+# Pilotes 100 % Rust, sans TLS (dev local) : évite OpenSSL, compatible toolchain GNU.
+postgres = "0.19"
+mysql = { version = "25", default-features = false, features = ["minimal"] }
 
 # Accès natif aux process (snapshot parent/enfant, TerminateProcess) : évite de
 # spawner PowerShell/taskkill à chaque kill ou polling de ports.

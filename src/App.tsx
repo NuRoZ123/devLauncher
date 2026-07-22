@@ -4,6 +4,9 @@ import { BranchModal, type BranchModalState } from "./components/BranchModal";
 import { Console } from "./components/Console";
 import { ColorPicker } from "./components/ColorPicker";
 import { CustomActionManager } from "./components/CustomActionManager";
+import { DbConnectionModal, type DbModalState } from "./components/DbConnectionModal";
+import { DbWorkspaceView, type DbWsState } from "./components/DbWorkspaceView";
+import { DbTableDataView, type DbDataState } from "./components/DbTableDataView";
 import { EnvModal, type EnvModalState } from "./components/EnvModal";
 import { PackageLinkModal, type LinkModalState } from "./components/PackageLinkModal";
 import { ProjectRow } from "./components/ProjectRow";
@@ -23,9 +26,12 @@ import {
 import { GeneralSequenceModal } from "./components/GeneralSequenceModal";
 import { checkForUpdate, type UpdateInfo } from "./update";
 import { expandActions, isSequenceValid } from "./sequences";
+import { parseEnv } from "./env";
 import type {
   ActionDef,
   Config,
+  DbConnection,
+  DbRowUpdate,
   GitInfo,
   JobStatus,
   LogLine,
@@ -40,6 +46,34 @@ import type {
 
 type StepToken = { cancelled: boolean; runId: string };
 type StepPlan = { action: ActionDef; branch?: string };
+
+/** Un onglet de table : ses données + son historique de navigation (FK). */
+type DbTab = {
+  id: string;
+  data: DbDataState;
+  navStack: { state: DbDataState; scrollTop: number }[];
+};
+
+// Résout un mapping BDD (clés .env) vers ses valeurs concrètes. Le port par
+// défaut dépend du pilote quand la clé est absente/vide.
+function resolveDbValues(conn: DbConnection, env: Record<string, string>) {
+  const val = (k: string) => (k ? env[k] ?? "" : "");
+  const portRaw = val(conn.portKey).trim();
+  const port = portRaw
+    ? Number.parseInt(portRaw, 10)
+    : conn.driver === "postgres"
+      ? 5432
+      : 3306;
+  return {
+    host: val(conn.hostKey),
+    port,
+    user: val(conn.userKey),
+    password: val(conn.passwordKey),
+    database: val(conn.databaseKey),
+    portRaw,
+    portValid: !(Number.isNaN(port) || port <= 0 || port > 65535),
+  };
+}
 
 const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 
@@ -65,6 +99,10 @@ const KIND_TITLE: Record<ProjectKind, string> = {
 
 export default function App() {
   const [config, setConfig] = useState<Config | null>(null);
+  // Miroir de `config` pour les callbacks async (évite de les recréer, et lit
+  // toujours la dernière config lors d'un test BDD asynchrone).
+  const configRef = useRef<Config | null>(null);
+  configRef.current = config;
   // Config incomplète chargée du disque (ex. commande de démarrage manquante) :
   // sert à pré-remplir l'écran Setup et à conserver séquences/actions existantes.
   const [partialConfig, setPartialConfig] = useState<Config | null>(null);
@@ -91,20 +129,6 @@ export default function App() {
   useEffect(() => {
     jobsRef.current = jobs;
   }, [jobs]);
-
-  // Échap ferme le menu des tâches, puis la page réglages.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      if (jobsOpen) {
-        setJobsOpen(false);
-      } else if (view === "settings") {
-        setView("dashboard");
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [jobsOpen, view]);
 
   // Trace une opération non annulable (scan, libération de port…) dans la file.
   const track = useCallback(
@@ -176,6 +200,31 @@ export default function App() {
   const branchResolver = useRef<((b: string | null) => void) | null>(null);
 
   const [envModal, setEnvModal] = useState<EnvModalState | null>(null);
+  const [dbModal, setDbModal] = useState<DbModalState | null>(null);
+  const [dbTesting, setDbTesting] = useState<Set<string>>(new Set());
+  // Espace de travail BDD : liste des tables (à gauche) + onglets de tables.
+  const [dbWs, setDbWs] = useState<DbWsState | null>(null);
+  const [dbTabs, setDbTabs] = useState<DbTab[]>([]);
+  const [dbActiveTab, setDbActiveTab] = useState<string | null>(null);
+  /** Modifications en attente par onglet (pastille sur l'onglet). */
+  const [dbDirty, setDbDirty] = useState<Record<string, number>>({});
+  // Verrou synchrone : empêche plusieurs chargements de page concurrents
+  // (les événements de scroll arrivent plus vite que la mise à jour d'état).
+  const loadingMoreRef = useRef(false);
+  // Incrémenté à chaque chargement complet (pas lors d'un ajout de page).
+  const dbLoadSeq = useRef(0);
+
+  // Échap ferme l'overlay le plus haut : BDD → tâches → réglages.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (dbWs) setDbWs(null);
+      else if (jobsOpen) setJobsOpen(false);
+      else if (view === "settings") setView("dashboard");
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [dbWs, jobsOpen, view]);
 
   const bash = config?.git_bash_path ?? DEFAULT_GIT_BASH;
   const root = config?.projects_root ?? "";
@@ -211,6 +260,9 @@ export default function App() {
           custom_actions: alreadySeeded ? (c.custom_actions ?? []) : seedActions(c.custom_actions ?? []),
           action_colors: c.action_colors ?? {},
           actions_seeded: true,
+          db_connections: c.db_connections ?? {},
+          db_row_limit: c.db_row_limit ?? 200,
+          db_disabled: c.db_disabled ?? {},
         };
         setConfig(next);
         if (!alreadySeeded) void api.saveConfig(next); // fige le semis dès le 1er lancement
@@ -1086,6 +1138,502 @@ export default function App() {
     await api.saveConfig(next);
   }, []);
 
+  // ----- Connexion base de données -----
+  const openDb = useCallback(
+    (p: Project) => {
+      setDbModal({
+        projectId: p.id,
+        projectName: p.name,
+        env: {},
+        keys: [],
+        saved: config?.db_connections?.[p.id] ?? null,
+        loading: true,
+      });
+      api
+        .readEnv(p.path)
+        .then((content) => {
+          const env = parseEnv(content);
+          setDbModal((m) =>
+            m && m.projectId === p.id
+              ? { ...m, env, keys: Object.keys(env), loading: false }
+              : m,
+          );
+        })
+        .catch((e) =>
+          setDbModal((m) =>
+            m && m.projectId === p.id ? { ...m, loading: false, error: String(e) } : m,
+          ),
+        );
+    },
+    [config],
+  );
+
+  // Résout les valeurs (clés .env → valeurs) et teste la connexion côté Rust.
+  const resolveAndTest = useCallback(
+    async (
+      conn: DbConnection,
+      env: Record<string, string>,
+    ): Promise<{ ok: boolean; message: string }> => {
+      const v = resolveDbValues(conn, env);
+      if (!v.portValid) {
+        return { ok: false, message: `Port invalide : « ${v.portRaw} »` };
+      }
+      try {
+        const version = await api.dbConnect(
+          conn.driver,
+          v.host,
+          v.port,
+          v.user,
+          v.password,
+          v.database,
+        );
+        return { ok: true, message: version };
+      } catch (e) {
+        return { ok: false, message: String(e) };
+      }
+    },
+    [],
+  );
+
+  // Persiste le mapping (sans identifiants) avec le drapeau `verified` : c'est
+  // lui qui pilote la couleur du bouton BDD.
+  const saveDbConn = useCallback(
+    async (projectId: string, conn: DbConnection, ok: boolean) => {
+      const cfg = configRef.current;
+      if (!cfg) return;
+      const saved: DbConnection = { ...conn, verified: ok };
+      await persist({
+        ...cfg,
+        db_connections: { ...cfg.db_connections, [projectId]: saved },
+      });
+    },
+    [persist],
+  );
+
+  // Enregistre le mapping puis teste la connexion (depuis la modale).
+  const dbConnect = useCallback(
+    async (conn: DbConnection): Promise<{ ok: boolean; message: string }> => {
+      const m = dbModal;
+      if (!m) return { ok: false, message: "Fenêtre fermée." };
+      const result = await resolveAndTest(conn, m.env);
+      await saveDbConn(m.projectId, conn, result.ok);
+      setDbModal((cur) => (cur ? { ...cur, saved: { ...conn, verified: result.ok } } : cur));
+      // La modale se ferme en cas de succès : on trace le résultat côté service.
+      pushLocal(
+        m.projectId,
+        result.ok ? `✓ BDD connectée — ${result.message}` : `✗ BDD : ${result.message}`,
+        "sys",
+      );
+      return result;
+    },
+    [dbModal, resolveAndTest, saveDbConn, pushLocal],
+  );
+
+  // Re-teste la connexion enregistrée directement depuis le bouton BDD de la
+  // ligne (relit le .env pour résoudre les valeurs). Affiche un loader et met à
+  // jour l'état vérifié/non-vérifié selon le résultat.
+  const retestDb = useCallback(
+    async (p: Project) => {
+      const conn = configRef.current?.db_connections?.[p.id];
+      if (!conn || dbTesting.has(p.id)) return;
+      setDbTesting((s) => new Set(s).add(p.id));
+      try {
+        const content = await api.readEnv(p.path).catch(() => "");
+        const result = await resolveAndTest(conn, parseEnv(content));
+        await saveDbConn(p.id, conn, result.ok);
+        pushLocal(
+          p.id,
+          result.ok ? `✓ BDD connectée — ${result.message}` : `✗ BDD : ${result.message}`,
+          "sys",
+        );
+      } finally {
+        setDbTesting((s) => {
+          const n = new Set(s);
+          n.delete(p.id);
+          return n;
+        });
+      }
+    },
+    [dbTesting, resolveAndTest, saveDbConn, pushLocal],
+  );
+
+  // ----- Espace de travail BDD : liste des tables + onglets -----
+
+  /** Ouvre l'espace de travail d'un service : connexion + liste des tables. */
+  const openDbWorkspace = useCallback(
+    async (p: Project) => {
+      const conn = configRef.current?.db_connections?.[p.id];
+      if (!conn) return;
+      setDbWs({
+        projectId: p.id,
+        projectName: p.name,
+        driver: conn.driver,
+        database: "",
+        tables: [],
+        loading: true,
+      });
+      setDbTabs([]);
+      setDbActiveTab(null);
+      setDbDirty({});
+      const content = await api.readEnv(p.path).catch(() => "");
+      const v = resolveDbValues(conn, parseEnv(content));
+      const patch = (fn: (s: DbWsState) => DbWsState) =>
+        setDbWs((s) => (s && s.projectId === p.id ? fn(s) : s));
+      if (!v.portValid) {
+        patch((s) => ({ ...s, loading: false, error: `Port invalide : « ${v.portRaw} »` }));
+        await saveDbConn(p.id, conn, false);
+        return;
+      }
+      try {
+        const tables = await api.dbTables(
+          conn.driver,
+          v.host,
+          v.port,
+          v.user,
+          v.password,
+          v.database,
+        );
+        patch((s) => ({ ...s, database: v.database, tables, loading: false }));
+        await saveDbConn(p.id, conn, true);
+      } catch (e) {
+        patch((s) => ({ ...s, loading: false, error: String(e) }));
+        await saveDbConn(p.id, conn, false);
+      }
+    },
+    [saveDbConn],
+  );
+
+  /** Recharge la liste des tables sans toucher aux onglets ouverts. */
+  const refreshWsTables = useCallback(async () => {
+    const ws = dbWs;
+    if (!ws) return;
+    const conn = configRef.current?.db_connections?.[ws.projectId];
+    const p = projects.find((x) => x.id === ws.projectId);
+    if (!conn || !p) return;
+    setDbWs((s) => (s ? { ...s, loading: true, error: undefined } : s));
+    const content = await api.readEnv(p.path).catch(() => "");
+    const v = resolveDbValues(conn, parseEnv(content));
+    if (!v.portValid) {
+      setDbWs((s) => (s ? { ...s, loading: false, error: `Port invalide : « ${v.portRaw} »` } : s));
+      return;
+    }
+    try {
+      const tables = await api.dbTables(conn.driver, v.host, v.port, v.user, v.password, v.database);
+      setDbWs((s) => (s ? { ...s, database: v.database, tables, loading: false } : s));
+    } catch (e) {
+      setDbWs((s) => (s ? { ...s, loading: false, error: String(e) } : s));
+    }
+  }, [dbWs, projects]);
+
+  /** Charge (ou recharge) un onglet : page 0, avec limite et filtre donnés. */
+  const loadTab = useCallback(
+    async (tabId: string, projectId: string, table: string, limit: number, filter: string) => {
+      const conn = configRef.current?.db_connections?.[projectId];
+      const p = projects.find((x) => x.id === projectId);
+      if (!conn || !p) return;
+      const loadId = ++dbLoadSeq.current;
+      setDbTabs((ts) =>
+        ts.map((t) =>
+          t.id !== tabId
+            ? t
+            : {
+                ...t,
+                data: {
+                  ...t.data,
+                  projectId,
+                  projectName: p.name,
+                  driver: conn.driver,
+                  table,
+                  // Conserve l'affichage si on recharge la même table.
+                  columns: t.data.table === table ? t.data.columns : [],
+                  types: t.data.table === table ? t.data.types : [],
+                  editors: t.data.table === table ? t.data.editors : [],
+                  enums: t.data.table === table ? t.data.enums : [],
+                  required: t.data.table === table ? t.data.required : [],
+                  fks: t.data.table === table ? t.data.fks : [],
+                  rows: t.data.table === table ? t.data.rows : [],
+                  loadId,
+                  limit,
+                  filter,
+                  loading: true,
+                  hasMore: false,
+                  loadingMore: false,
+                  restoreScroll: undefined,
+                  error: undefined,
+                },
+              },
+        ),
+      );
+      // N'applique le résultat que si l'onglet n'a pas été rechargé entre-temps.
+      const applyFresh = (fn: (d: DbDataState) => DbDataState) =>
+        setDbTabs((ts) =>
+          ts.map((t) =>
+            t.id === tabId && t.data.loadId === loadId ? { ...t, data: fn(t.data) } : t,
+          ),
+        );
+      const content = await api.readEnv(p.path).catch(() => "");
+      const v = resolveDbValues(conn, parseEnv(content));
+      if (!v.portValid) {
+        applyFresh((d) => ({ ...d, loading: false, error: `Port invalide : « ${v.portRaw} »` }));
+        return;
+      }
+      try {
+        const data = await api.dbTableRows(
+          conn.driver,
+          v.host,
+          v.port,
+          v.user,
+          v.password,
+          v.database,
+          table,
+          limit,
+          0,
+          filter,
+        );
+        applyFresh((d) => ({
+          ...d,
+          database: v.database,
+          columns: data.columns,
+          types: data.types,
+          editors: data.editors,
+          enums: data.enums,
+          required: data.required,
+          fks: data.fks,
+          rows: data.rows,
+          loading: false,
+          hasMore: data.rows.length >= limit,
+        }));
+      } catch (e) {
+        applyFresh((d) => ({ ...d, loading: false, error: String(e) }));
+      }
+    },
+    [projects],
+  );
+
+  /** Ouvre une table dans un onglet (ou réactive l'onglet existant). */
+  const openTableTab = useCallback(
+    (table: string) => {
+      const ws = dbWs;
+      if (!ws) return;
+      const existing = dbTabs.find((t) => t.data.table === table);
+      if (existing) {
+        setDbActiveTab(existing.id);
+        return;
+      }
+      const id = uid();
+      const limit = configRef.current?.db_row_limit ?? 200;
+      const data: DbDataState = {
+        projectId: ws.projectId,
+        projectName: ws.projectName,
+        driver: ws.driver,
+        database: ws.database,
+        table,
+        columns: [],
+        types: [],
+        editors: [],
+        enums: [],
+        required: [],
+        fks: [],
+        rows: [],
+        loadId: 0,
+        limit,
+        filter: "",
+        loading: true,
+        hasMore: false,
+        loadingMore: false,
+      };
+      setDbTabs((ts) => [...ts, { id, data, navStack: [] }]);
+      setDbActiveTab(id);
+      void loadTab(id, ws.projectId, table, limit, "");
+    },
+    [dbWs, dbTabs, loadTab],
+  );
+
+  const closeDbTab = useCallback(
+    (id: string) => {
+      const idx = dbTabs.findIndex((t) => t.id === id);
+      const next = dbTabs.filter((t) => t.id !== id);
+      setDbTabs(next);
+      if (dbActiveTab === id) {
+        setDbActiveTab(next[Math.min(idx, next.length - 1)]?.id ?? null);
+      }
+      setDbDirty((d) => {
+        const n = { ...d };
+        delete n[id];
+        return n;
+      });
+    },
+    [dbTabs, dbActiveTab],
+  );
+
+  /** Scroll infini : ajoute la page suivante (OFFSET) aux lignes de l'onglet. */
+  const loadMoreTab = useCallback(
+    async (tabId: string) => {
+      const tab = dbTabs.find((t) => t.id === tabId);
+      if (!tab) return;
+      const d = tab.data;
+      if (d.loading || d.loadingMore || !d.hasMore || loadingMoreRef.current) return;
+      const conn = configRef.current?.db_connections?.[d.projectId];
+      const p = projects.find((x) => x.id === d.projectId);
+      if (!conn || !p) return;
+      loadingMoreRef.current = true;
+      const { table, filter, limit, loadId } = d;
+      const offset = d.rows.length;
+      setDbTabs((ts) =>
+        ts.map((t) => (t.id === tabId ? { ...t, data: { ...t.data, loadingMore: true } } : t)),
+      );
+      // Garde anti-course : même onglet, même chargement, même nombre de lignes.
+      const applyFresh = (fn: (x: DbDataState) => DbDataState) =>
+        setDbTabs((ts) =>
+          ts.map((t) =>
+            t.id === tabId && t.data.loadId === loadId && t.data.rows.length === offset
+              ? { ...t, data: fn(t.data) }
+              : t,
+          ),
+        );
+      try {
+        const content = await api.readEnv(p.path).catch(() => "");
+        const v = resolveDbValues(conn, parseEnv(content));
+        if (!v.portValid) {
+          applyFresh((x) => ({ ...x, loadingMore: false }));
+          return;
+        }
+        const data = await api.dbTableRows(
+          conn.driver,
+          v.host,
+          v.port,
+          v.user,
+          v.password,
+          v.database,
+          table,
+          limit,
+          offset,
+          filter,
+        );
+        applyFresh((x) => ({
+          ...x,
+          rows: [...x.rows, ...data.rows],
+          loadingMore: false,
+          hasMore: data.rows.length >= limit,
+        }));
+      } catch (e) {
+        applyFresh((x) => ({ ...x, loadingMore: false, error: String(e) }));
+      } finally {
+        loadingMoreRef.current = false;
+      }
+    },
+    [dbTabs, projects],
+  );
+
+  /** Change la taille de page (persistée en config) et recharge l'onglet. */
+  const changeTabLimit = useCallback(
+    (tabId: string, limit: number) => {
+      const tab = dbTabs.find((t) => t.id === tabId);
+      if (!tab) return;
+      const cfg = configRef.current;
+      if (cfg && cfg.db_row_limit !== limit) void persist({ ...cfg, db_row_limit: limit });
+      void loadTab(tabId, tab.data.projectId, tab.data.table, limit, tab.data.filter);
+    },
+    [dbTabs, persist, loadTab],
+  );
+
+  const changeTabFilter = useCallback(
+    (tabId: string, filter: string) => {
+      const tab = dbTabs.find((t) => t.id === tabId);
+      if (!tab) return;
+      void loadTab(tabId, tab.data.projectId, tab.data.table, tab.data.limit, filter);
+    },
+    [dbTabs, loadTab],
+  );
+
+  const refreshTab = useCallback(
+    (tabId: string) => {
+      const tab = dbTabs.find((t) => t.id === tabId);
+      if (!tab) return;
+      void loadTab(tabId, tab.data.projectId, tab.data.table, tab.data.limit, tab.data.filter);
+    },
+    [dbTabs, loadTab],
+  );
+
+  /** Suit une clé étrangère dans l'onglet : empile la vue puis charge la cible. */
+  const navigateTabFk = useCallback(
+    (tabId: string, targetTable: string, filter: string, scrollTop: number) => {
+      const tab = dbTabs.find((t) => t.id === tabId);
+      if (!tab) return;
+      setDbTabs((ts) =>
+        ts.map((t) =>
+          t.id === tabId ? { ...t, navStack: [...t.navStack, { state: t.data, scrollTop }] } : t,
+        ),
+      );
+      void loadTab(
+        tabId,
+        tab.data.projectId,
+        targetTable,
+        configRef.current?.db_row_limit ?? 200,
+        filter,
+      );
+    },
+    [dbTabs, loadTab],
+  );
+
+  /** Retour : restaure la vue précédente de l'onglet (lignes + scroll). */
+  const goBackTab = useCallback((tabId: string) => {
+    setDbTabs((ts) =>
+      ts.map((t) => {
+        if (t.id !== tabId || t.navStack.length === 0) return t;
+        const snap = t.navStack[t.navStack.length - 1];
+        return {
+          ...t,
+          data: { ...snap.state, restoreScroll: { top: snap.scrollTop, token: Date.now() } },
+          navStack: t.navStack.slice(0, -1),
+        };
+      }),
+    );
+  }, []);
+
+  /** Applique en une transaction les changements en attente d'un onglet. */
+  const applyTabChanges = useCallback(
+    async (
+      tabId: string,
+      inserts: { column: string; value: string | null }[][],
+      updates: DbRowUpdate[],
+      deletes: (string | null)[][],
+    ): Promise<{ ok: boolean; message: string }> => {
+      const tab = dbTabs.find((t) => t.id === tabId);
+      if (!tab) return { ok: false, message: "Onglet fermé." };
+      const cur = tab.data;
+      if (inserts.length === 0 && updates.length === 0 && deletes.length === 0)
+        return { ok: true, message: "Rien à enregistrer." };
+      const conn = configRef.current?.db_connections?.[cur.projectId];
+      const p = projects.find((x) => x.id === cur.projectId);
+      if (!conn || !p) return { ok: false, message: "Service introuvable." };
+      const content = await api.readEnv(p.path).catch(() => "");
+      const v = resolveDbValues(conn, parseEnv(content));
+      if (!v.portValid) return { ok: false, message: `Port invalide : « ${v.portRaw} »` };
+      try {
+        const res = await api.dbApplyChanges(
+          conn.driver,
+          v.host,
+          v.port,
+          v.user,
+          v.password,
+          v.database,
+          cur.table,
+          cur.columns,
+          inserts,
+          updates,
+          deletes,
+        );
+        const summary = `${res.inserted} ajoutée(s), ${res.updated} modifiée(s), ${res.deleted} supprimée(s)`;
+        pushLocal(cur.projectId, `💾 ${cur.table} : ${summary}`, "sys");
+        await loadTab(tabId, cur.projectId, cur.table, cur.limit, cur.filter);
+        return { ok: true, message: summary };
+      } catch (e) {
+        return { ok: false, message: String(e) };
+      }
+    },
+    [dbTabs, projects, loadTab, pushLocal],
+  );
   const onSetupSubmit = useCallback(
     async (r: string, b: string, cmd: string) => {
       // Conserve les séquences / actions d'une éventuelle config incomplète
@@ -1099,6 +1647,9 @@ export default function App() {
         custom_actions: seedActions(partialConfig?.custom_actions ?? []),
         action_colors: partialConfig?.action_colors ?? {},
         actions_seeded: true,
+        db_connections: partialConfig?.db_connections ?? {},
+        db_row_limit: partialConfig?.db_row_limit ?? 200,
+        db_disabled: partialConfig?.db_disabled ?? {},
       });
       setPartialConfig(null);
     },
@@ -1389,6 +1940,12 @@ export default function App() {
                       onFreePort={onFreePort}
                       onRunTests={onRunTestsRow}
                       onEditEnv={openEnv}
+                      onDbConnect={openDb}
+                      onDbRetest={retestDb}
+                      onDbOpenTables={openDbWorkspace}
+                      dbConn={config?.db_connections?.[p.id]}
+                      dbTesting={dbTesting.has(p.id)}
+                      dbDisabled={!!config?.db_disabled?.[p.id]}
                       onEditStartCommand={openProjectCommand}
                     />
                   ))}
@@ -1448,6 +2005,59 @@ export default function App() {
         />
       )}
 
+      {dbModal && (
+        <DbConnectionModal
+          state={dbModal}
+          onConnect={dbConnect}
+          onCancel={() => setDbModal(null)}
+        />
+      )}
+
+      {dbWs && (
+        <DbWorkspaceView
+          state={dbWs}
+          tabs={dbTabs.map((t) => ({
+            id: t.id,
+            label: t.data.table,
+            dirty: dbDirty[t.id] ?? 0,
+          }))}
+          activeId={dbActiveTab}
+          onOpenTable={openTableTab}
+          onSelectTab={setDbActiveTab}
+          onCloseTab={closeDbTab}
+          onRefreshTables={refreshWsTables}
+          onClose={() => setDbWs(null)}
+        >
+          {/* Tous les onglets restent montés (état local préservé) ; seul
+              l'onglet actif est visible. */}
+          {dbTabs.map((t) => (
+            <div
+              key={t.id}
+              className="dbws-tabpanel"
+              style={{ display: t.id === dbActiveTab ? "flex" : "none" }}
+            >
+              <DbTableDataView
+                state={t.data}
+                active={t.id === dbActiveTab}
+                onLimitChange={(n) => changeTabLimit(t.id, n)}
+                onFilterChange={(f) => changeTabFilter(t.id, f)}
+                onRefresh={() => refreshTab(t.id)}
+                onApply={(ins, upd, del) => applyTabChanges(t.id, ins, upd, del)}
+                onLoadMore={() => loadMoreTab(t.id)}
+                onNavigateFk={(table, filter, scrollTop) =>
+                  navigateTabFk(t.id, table, filter, scrollTop)
+                }
+                onBack={() => goBackTab(t.id)}
+                canBack={t.navStack.length > 0}
+                onDirtyChange={(n) =>
+                  setDbDirty((d) => (d[t.id] === n ? d : { ...d, [t.id]: n }))
+                }
+              />
+            </div>
+          ))}
+        </DbWorkspaceView>
+      )}
+
       {cmdModal && (
         <StartCommandModal
           project={cmdModal.project}
@@ -1490,13 +2100,14 @@ export default function App() {
 // Vue Réglages
 // ---------------------------------------------------------------------------
 
-type SettingsTab = "general" | "startup" | "actions" | "sequences";
+type SettingsTab = "general" | "startup" | "actions" | "sequences" | "database";
 
 const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   { id: "general", label: "Général" },
   { id: "startup", label: "Démarrage" },
   { id: "actions", label: "Actions" },
   { id: "sequences", label: "Séquences" },
+  { id: "database", label: "Base de données" },
 ];
 
 function SettingsView({
@@ -1560,6 +2171,9 @@ function SettingsView({
       custom_actions: d.custom_actions,
       action_colors: d.action_colors,
       actions_seeded: d.actions_seeded,
+      db_connections: d.db_connections ?? {},
+      db_row_limit: d.db_row_limit ?? 200,
+      db_disabled: d.db_disabled ?? {},
     });
     setSavedAt(Date.now());
   }, [onPersist]);
@@ -1839,6 +2453,45 @@ function SettingsView({
               actions={settingsActions}
               onChange={commitSequences}
             />
+          </>
+        )}
+
+        {tab === "database" && (
+          <>
+            <h2>Services sans base de données</h2>
+            <p className="muted settings-hint">
+              Cochez un service pour indiquer qu'il n'a pas de base : son bouton base de
+              données est alors masqué dans la liste des projets.
+            </p>
+            {(() => {
+              const services = projects.filter((p) => p.kind === "service");
+              if (services.length === 0) {
+                return <p className="muted">Aucun service détecté.</p>;
+              }
+              const disabled = draft.db_disabled ?? {};
+              return (
+                <div className="db-disabled-list">
+                  {services.map((p) => (
+                    <label className="autostart-row" key={p.id}>
+                      <input
+                        type="checkbox"
+                        checked={!!disabled[p.id]}
+                        onChange={(e) => {
+                          const next = { ...(draftRef.current.db_disabled ?? {}) };
+                          if (e.target.checked) next[p.id] = true;
+                          else delete next[p.id];
+                          patch({ db_disabled: next });
+                        }}
+                      />
+                      <span>{p.name}</span>
+                      {draft.db_connections?.[p.id] && !disabled[p.id] && (
+                        <span className="chip chip-db-ok">connexion configurée</span>
+                      )}
+                    </label>
+                  ))}
+                </div>
+              );
+            })()}
           </>
         )}
 

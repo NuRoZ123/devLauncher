@@ -1,7 +1,15 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { actionAllowed } from "../constants";
 import { expandActions, isSequenceValid } from "../sequences";
-import type { ActionDef, GitInfo, PortInfo, Project, Sequence, TestResult } from "../types";
+import type {
+  ActionDef,
+  DbConnection,
+  GitInfo,
+  PortInfo,
+  Project,
+  Sequence,
+  TestResult,
+} from "../types";
 
 interface Props {
   project: Project;
@@ -24,8 +32,41 @@ interface Props {
   onFreePort: (p: Project) => void;
   onRunTests: (p: Project) => void;
   onEditEnv: (p: Project) => void;
+  /** Ouvre la configuration/connexion à la base de données du service. */
+  onDbConnect: (p: Project) => void;
+  /** Re-teste la connexion BDD enregistrée (bouton BDD non vérifié). */
+  onDbRetest: (p: Project) => void;
+  /** Ouvre la page des tables (bouton BDD connecté). */
+  onDbOpenTables: (p: Project) => void;
+  /** Mapping BDD enregistré pour ce service (pilote l'état visuel du bouton). */
+  dbConn?: DbConnection;
+  /** true = test de connexion BDD en cours (loader dans le bouton). */
+  dbTesting?: boolean;
+  /** true = service déclaré sans base de données (bouton masqué). */
+  dbDisabled?: boolean;
   /** Ouvre l'édition de la commande de démarrage du projet (clic droit sur « Démarrer »). */
   onEditStartCommand: (p: Project) => void;
+}
+
+/** Icône base de données (cylindre), hérite de la couleur du bouton. */
+function DbIcon() {
+  return (
+    <svg
+      className="db-icon"
+      viewBox="0 0 16 16"
+      width="14"
+      height="14"
+      aria-hidden="true"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+    >
+      <ellipse cx="8" cy="3.6" rx="5.4" ry="2.2" />
+      <path d="M2.6 3.6v8.8c0 1.2 2.4 2.2 5.4 2.2s5.4-1 5.4-2.2V3.6" />
+      <path d="M2.6 8c0 1.2 2.4 2.2 5.4 2.2s5.4-1 5.4-2.2" />
+    </svg>
+  );
 }
 
 const KIND_LABEL: Record<string, string> = {
@@ -113,6 +154,12 @@ export const ProjectRow = memo(function ProjectRow({
   onFreePort,
   onRunTests,
   onEditEnv,
+  onDbConnect,
+  onDbRetest,
+  onDbOpenTables,
+  dbConn,
+  dbTesting,
+  dbDisabled,
   onEditStartCommand,
 }: Props) {
   const startable = project.start_command != null;
@@ -360,6 +407,45 @@ export const ProjectRow = memo(function ProjectRow({
             onClick={() => onEditEnv(project)}
           >
             .env
+          </button>
+        )}
+
+        {project.kind === "service" && project.has_env && !dbDisabled && (
+          <button
+            className={
+              "btn btn-sm btn-db" +
+              (dbConn ? (dbConn.verified ? " db-ok" : " db-unverified") : "")
+            }
+            disabled={dbTesting}
+            title={
+              dbConn
+                ? (dbConn.verified
+                    ? "Base de données connectée — clic pour voir les tables"
+                    : "Connexion BDD non vérifiée — clic pour re-tester") +
+                  " · clic droit : configurer"
+                : "Configurer / tester la connexion à la base de données"
+            }
+            // Connecté : clic = page des tables. Configuré non vérifié : re-test.
+            // Non configuré : ouvre la modale de configuration.
+            onClick={() =>
+              dbConn
+                ? dbConn.verified
+                  ? onDbOpenTables(project)
+                  : onDbRetest(project)
+                : onDbConnect(project)
+            }
+            // Clic droit : ouvre la modale de configuration d'un service déjà configuré.
+            onContextMenu={
+              dbConn
+                ? (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    onDbConnect(project);
+                  }
+                : undefined
+            }
+          >
+            {dbTesting ? <span className="spinner spinner-xs" /> : <DbIcon />}
           </button>
         )}
 
