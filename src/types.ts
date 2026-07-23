@@ -156,6 +156,134 @@ export interface DbTableData {
   rows: (string | null)[][];
 }
 
+/** Cible d'une clé étrangère, avec ses règles de propagation. */
+export interface DbSchemaFk {
+  table: string;
+  column: string;
+  on_update: string | null;
+  on_delete: string | null;
+}
+
+/** Description complète d'une colonne (onglet « Structure »). */
+export interface DbSchemaColumn {
+  name: string;
+  /** Position dans la table (1-based). */
+  position: number;
+  /** Type SQL complet tel que déclaré : "varchar(255)", "numeric(10,2)". */
+  full_type: string;
+  /** Type de base sans précision : "varchar", "int4". */
+  base_type: string;
+  nullable: boolean;
+  default: string | null;
+  /** Mentions supplémentaires : "auto_increment", "identity", "generated"… */
+  extra: string;
+  comment: string | null;
+  primary_key: boolean;
+  /** Couverte par une contrainte / un index d'unicité. */
+  unique: boolean;
+  /** Apparaît dans au moins un index. */
+  indexed: boolean;
+  fk: DbSchemaFk | null;
+  /** Valeurs possibles d'une colonne enum (vide sinon). */
+  enum_values: string[];
+  collation: string | null;
+}
+
+export interface DbSchemaIndex {
+  name: string;
+  unique: boolean;
+  primary: boolean;
+  /** Méthode d'indexation : "BTREE", "HASH", "gin"… */
+  kind: string;
+  columns: string[];
+  /** Définition SQL complète (Postgres uniquement). */
+  definition: string | null;
+}
+
+export interface DbSchemaConstraint {
+  name: string;
+  /** "PRIMARY KEY" | "UNIQUE" | "FOREIGN KEY" | "CHECK". */
+  kind: string;
+  columns: string[];
+  /** Cible d'une clé étrangère, au format "table(colonne)". */
+  references: string | null;
+  on_update: string | null;
+  on_delete: string | null;
+  /** Expression d'un CHECK, ou définition complète de la contrainte. */
+  expression: string | null;
+}
+
+/** Structure d'une table : colonnes détaillées, index et contraintes. */
+export interface DbTableSchema {
+  table: string;
+  /** Moteur de stockage (MariaDB/MySQL) ou méthode d'accès (Postgres). */
+  engine: string | null;
+  collation: string | null;
+  comment: string | null;
+  /** Nombre de lignes *estimé* par le moteur (statistiques, non exact). */
+  est_rows: number | null;
+  /** Taille totale (données + index), lisible. */
+  size: string | null;
+  columns: DbSchemaColumn[];
+  indexes: DbSchemaIndex[];
+  constraints: DbSchemaConstraint[];
+}
+
+/** Type de contrainte gérable depuis l'onglet « Structure ». */
+export type DbConstraintKind = "PRIMARY KEY" | "UNIQUE" | "FOREIGN KEY" | "CHECK";
+
+/**
+ * Une modification de structure demandée depuis l'onglet « Structure ».
+ * Pour une colonne, `type`, `default` et `comment` décrivent l'état *voulu*.
+ */
+export type DbSchemaChange =
+  | {
+      op: "col_add";
+      name: string;
+      type: string;
+      nullable: boolean;
+      default: string | null;
+      comment: string | null;
+    }
+  | {
+      op: "col_modify";
+      /** Nom actuel de la colonne (cible de l'ALTER). */
+      name: string;
+      new_name: string;
+      type: string;
+      /** Type actuel : si identique, aucune conversion de type n'est émise. */
+      old_type: string;
+      nullable: boolean;
+      default: string | null;
+      comment: string | null;
+      /** EXTRA MariaDB/MySQL à préserver (auto_increment, on update…). */
+      extra: string;
+    }
+  | { op: "col_drop"; name: string }
+  | { op: "idx_add"; name: string; unique: boolean; columns: string[] }
+  | { op: "idx_drop"; name: string }
+  | {
+      op: "con_add";
+      name: string;
+      kind: DbConstraintKind;
+      columns: string[];
+      ref_table: string | null;
+      ref_columns: string[];
+      on_update: string | null;
+      on_delete: string | null;
+      /** Expression d'un CHECK. */
+      expression: string | null;
+    }
+  | { op: "con_drop"; name: string; kind: string };
+
+export interface DbAlterResult {
+  added: number;
+  modified: number;
+  dropped: number;
+  /** Instructions SQL réellement exécutées. */
+  statements: string[];
+}
+
 export interface Config {
   projects_root: string;
   git_bash_path: string;

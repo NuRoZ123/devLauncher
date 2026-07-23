@@ -7,6 +7,7 @@ import { CustomActionManager } from "./components/CustomActionManager";
 import { DbConnectionModal, type DbModalState } from "./components/DbConnectionModal";
 import { DbWorkspaceView, type DbWsState } from "./components/DbWorkspaceView";
 import { DbTableDataView, type DbDataState } from "./components/DbTableDataView";
+import { DbTableSchemaView, type DbSchemaState } from "./components/DbTableSchemaView";
 import { EnvModal, type EnvModalState } from "./components/EnvModal";
 import { PackageLinkModal, type LinkModalState } from "./components/PackageLinkModal";
 import { ProjectRow } from "./components/ProjectRow";
@@ -32,6 +33,7 @@ import type {
   Config,
   DbConnection,
   DbRowUpdate,
+  DbSchemaChange,
   GitInfo,
   JobStatus,
   LogLine,
@@ -47,11 +49,18 @@ import type {
 type StepToken = { cancelled: boolean; runId: string };
 type StepPlan = { action: ActionDef; branch?: string };
 
+/** Sous-onglet d'une table : ses lignes, ou sa structure. */
+type DbTabView = "data" | "schema";
+
 /** Un onglet de table : ses données + son historique de navigation (FK). */
 type DbTab = {
   id: string;
   data: DbDataState;
   navStack: { state: DbDataState; scrollTop: number }[];
+  /** Sous-onglet affiché (données / structure). */
+  view: DbTabView;
+  /** Structure de la table, chargée à la première ouverture du sous-onglet. */
+  schema: DbSchemaState;
 };
 
 // Résout un mapping BDD (clés .env) vers ses valeurs concrètes. Le port par
@@ -206,7 +215,15 @@ export default function App() {
   const [dbTesting, setDbTesting] = useState<Set<string>>(new Set());
   // Espace de travail BDD : liste des tables (à gauche) + onglets de tables.
   const [dbWs, setDbWs] = useState<DbWsState | null>(null);
+  const dbWsRef = useRef<DbWsState | null>(null);
+  dbWsRef.current = dbWs;
+  /** Colonnes déjà lues, par « projet:table » (listes déroulantes de structure). */
+  const colCacheRef = useRef<Map<string, string[]>>(new Map());
   const [dbTabs, setDbTabs] = useState<DbTab[]>([]);
+  // Miroir de `dbTabs` : lit l'état courant hors du cycle de rendu (chargement
+  // de la structure déclenché juste après un setDbTabs).
+  const dbTabsRef = useRef<DbTab[]>([]);
+  dbTabsRef.current = dbTabs;
   const [dbActiveTab, setDbActiveTab] = useState<string | null>(null);
   /** Modifications en attente par onglet (pastille sur l'onglet). */
   const [dbDirty, setDbDirty] = useState<Record<string, number>>({});
@@ -1277,6 +1294,7 @@ export default function App() {
       setDbTabs([]);
       setDbActiveTab(null);
       setDbDirty({});
+      colCacheRef.current.clear();
       const content = await api.readEnv(p.path).catch(() => "");
       const v = resolveDbValues(conn, parseEnv(content));
       const patch = (fn: (s: DbWsState) => DbWsState) =>
@@ -1444,11 +1462,148 @@ export default function App() {
         hasMore: false,
         loadingMore: false,
       };
-      setDbTabs((ts) => [...ts, { id, data, navStack: [] }]);
+      setDbTabs((ts) => [
+        ...ts,
+        { id, data, navStack: [], view: "data", schema: { table: "", loading: false } },
+      ]);
       setDbActiveTab(id);
       void loadTab(id, ws.projectId, table, limit, "");
     },
     [dbWs, dbTabs, loadTab],
+  );
+
+  /** Charge la structure de la table affichée dans un onglet. */
+  const loadTabSchema = useCallback(
+    async (tabId: string) => {
+      const tab = dbTabsRef.current.find((t) => t.id === tabId);
+      if (!tab) return;
+      const { projectId, table } = tab.data;
+      const conn = configRef.current?.db_connections?.[projectId];
+      const p = projects.find((x) => x.id === projectId);
+      if (!conn || !p || !table) return;
+      // `schema.table` identifie le chargement en cours : un second chargement
+      // (autre table) le remplace et rend obsolètes les patchs du premier.
+      const patch = (fn: (s: DbSchemaState) => DbSchemaState) =>
+        setDbTabs((ts) =>
+          ts.map((t) =>
+            t.id === tabId && t.schema.table === table ? { ...t, schema: fn(t.schema) } : t,
+          ),
+        );
+      setDbTabs((ts) =>
+        ts.map((t) => (t.id === tabId ? { ...t, schema: { table, loading: true } } : t)),
+      );
+      const content = await api.readEnv(p.path).catch(() => "");
+      const v = resolveDbValues(conn, parseEnv(content));
+      if (!v.portValid) {
+        patch((s) => ({ ...s, loading: false, error: `Port invalide : « ${v.portRaw} »` }));
+        return;
+      }
+      try {
+        const info = await api.dbTableSchema(
+          conn.driver,
+          v.host,
+          v.port,
+          v.user,
+          v.password,
+          v.database,
+          table,
+        );
+        patch((s) => ({ ...s, info, loading: false }));
+      } catch (e) {
+        patch((s) => ({ ...s, loading: false, error: String(e) }));
+      }
+    },
+    [projects],
+  );
+
+  /** Colonnes d'une table, pour les listes déroulantes de l'onglet Structure.
+   *  Mémorisées par « projet:table » et vidées au changement d'espace de travail. */
+  const loadTableColumns = useCallback(
+    async (target: string): Promise<string[]> => {
+      const ws = dbWsRef.current;
+      if (!ws) return [];
+      const cacheKey = `${ws.projectId}:${target}`;
+      const hit = colCacheRef.current.get(cacheKey);
+      if (hit) return hit;
+      const conn = configRef.current?.db_connections?.[ws.projectId];
+      const p = projects.find((x) => x.id === ws.projectId);
+      if (!conn || !p) return [];
+      const content = await api.readEnv(p.path).catch(() => "");
+      const v = resolveDbValues(conn, parseEnv(content));
+      if (!v.portValid) return [];
+      try {
+        const cols = await api.dbTableColumns(
+          conn.driver,
+          v.host,
+          v.port,
+          v.user,
+          v.password,
+          v.database,
+          target,
+        );
+        colCacheRef.current.set(cacheKey, cols);
+        return cols;
+      } catch {
+        return [];
+      }
+    },
+    [projects],
+  );
+
+  /** Applique les modifications de structure d'un onglet (ALTER TABLE). */
+  const applyTabSchema = useCallback(
+    async (
+      tabId: string,
+      changes: DbSchemaChange[],
+    ): Promise<{ ok: boolean; message: string }> => {
+      const tab = dbTabsRef.current.find((t) => t.id === tabId);
+      if (!tab) return { ok: false, message: "Onglet fermé." };
+      const { projectId, table, limit, filter } = tab.data;
+      const conn = configRef.current?.db_connections?.[projectId];
+      const p = projects.find((x) => x.id === projectId);
+      if (!conn || !p) return { ok: false, message: "Service introuvable." };
+      const content = await api.readEnv(p.path).catch(() => "");
+      const v = resolveDbValues(conn, parseEnv(content));
+      if (!v.portValid) return { ok: false, message: `Port invalide : « ${v.portRaw} »` };
+      try {
+        const res = await api.dbAlterTable(
+          conn.driver,
+          v.host,
+          v.port,
+          v.user,
+          v.password,
+          v.database,
+          table,
+          changes,
+        );
+        const summary = `${res.added} ajoutée(s), ${res.modified} modifiée(s), ${res.dropped} supprimée(s)`;
+        pushLocal(projectId, `🧬 ${table} : ${summary}`, "sys");
+        for (const s of res.statements) pushLocal(projectId, `   ${s}`, "sys");
+        // Les colonnes ont changé : le cache des listes déroulantes est périmé.
+        colCacheRef.current.clear();
+        // Les colonnes ont changé : structure *et* données doivent être relues.
+        await loadTabSchema(tabId);
+        void loadTab(tabId, projectId, table, limit, filter);
+        return { ok: true, message: summary };
+      } catch (e) {
+        return { ok: false, message: String(e) };
+      }
+    },
+    [projects, loadTabSchema, loadTab, pushLocal],
+  );
+
+  /** Bascule entre les sous-onglets d'une table ; charge la structure au besoin. */
+  const setTabView = useCallback(
+    (tabId: string, view: DbTabView) => {
+      setDbTabs((ts) => ts.map((t) => (t.id === tabId ? { ...t, view } : t)));
+      if (view !== "schema") return;
+      const tab = dbTabsRef.current.find((t) => t.id === tabId);
+      // Structure absente ou obsolète (la table a changé en suivant une FK).
+      if (tab && !tab.schema.loading && tab.schema.table !== tab.data.table) {
+        void loadTabSchema(tabId);
+      }
+    },
+    [loadTabSchema],
   );
 
   const closeDbTab = useCallback(
@@ -2087,23 +2242,62 @@ export default function App() {
               className="dbws-tabpanel"
               style={{ display: t.id === dbActiveTab ? "flex" : "none" }}
             >
-              <DbTableDataView
-                state={t.data}
-                active={t.id === dbActiveTab}
-                onLimitChange={(n) => changeTabLimit(t.id, n)}
-                onFilterChange={(f) => changeTabFilter(t.id, f)}
-                onRefresh={() => refreshTab(t.id)}
-                onApply={(ins, upd, del) => applyTabChanges(t.id, ins, upd, del)}
-                onLoadMore={() => loadMoreTab(t.id)}
-                onNavigateFk={(table, filter, scrollTop) =>
-                  navigateTabFk(t.id, table, filter, scrollTop)
-                }
-                onBack={() => goBackTab(t.id)}
-                canBack={t.navStack.length > 0}
-                onDirtyChange={(n) =>
-                  setDbDirty((d) => (d[t.id] === n ? d : { ...d, [t.id]: n }))
-                }
-              />
+              <div className="dbsub-tabs">
+                <button
+                  className={"dbsub-tab" + (t.view === "data" ? " on" : "")}
+                  onClick={() => setTabView(t.id, "data")}
+                  title="Lignes de la table"
+                >
+                  ▤ Données
+                </button>
+                <button
+                  className={"dbsub-tab" + (t.view === "schema" ? " on" : "")}
+                  onClick={() => setTabView(t.id, "schema")}
+                  title="Colonnes, types, contraintes et index"
+                >
+                  🧬 Structure
+                </button>
+              </div>
+              {/* Les deux vues restent montées : les modifications en attente du
+                  tableau survivent au passage par la structure. */}
+              <div
+                className="dbsub-panel"
+                style={{ display: t.view === "data" ? "flex" : "none" }}
+              >
+                <DbTableDataView
+                  state={t.data}
+                  active={t.id === dbActiveTab && t.view === "data"}
+                  onLimitChange={(n) => changeTabLimit(t.id, n)}
+                  onFilterChange={(f) => changeTabFilter(t.id, f)}
+                  onRefresh={() => refreshTab(t.id)}
+                  onApply={(ins, upd, del) => applyTabChanges(t.id, ins, upd, del)}
+                  onLoadMore={() => loadMoreTab(t.id)}
+                  onNavigateFk={(table, filter, scrollTop) =>
+                    navigateTabFk(t.id, table, filter, scrollTop)
+                  }
+                  onBack={() => goBackTab(t.id)}
+                  canBack={t.navStack.length > 0}
+                  onDirtyChange={(n) =>
+                    setDbDirty((d) => (d[t.id] === n ? d : { ...d, [t.id]: n }))
+                  }
+                />
+              </div>
+              <div
+                className="dbsub-panel"
+                style={{ display: t.view === "schema" ? "flex" : "none" }}
+              >
+                <DbTableSchemaView
+                  table={t.data.table}
+                  state={t.schema}
+                  active={t.id === dbActiveTab && t.view === "schema"}
+                  driver={dbWs.driver}
+                  tables={dbWs.tables}
+                  onLoadColumns={loadTableColumns}
+                  onRefresh={() => loadTabSchema(t.id)}
+                  onOpenTable={openTableTab}
+                  onApply={(changes) => applyTabSchema(t.id, changes)}
+                />
+              </div>
             </div>
           ))}
         </DbWorkspaceView>

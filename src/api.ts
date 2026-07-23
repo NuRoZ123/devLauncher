@@ -9,9 +9,12 @@ import { open } from "@tauri-apps/plugin-dialog";
 import type {
   BranchInfo,
   Config,
+  DbAlterResult,
   DbDriver,
   DbRowUpdate,
+  DbSchemaChange,
   DbTableData,
+  DbTableSchema,
   GitInfo,
   LogLine,
   PkgMeta,
@@ -112,6 +115,69 @@ export const api = {
       limit,
       offset,
       filter,
+    }),
+
+  /** Lit la structure d'une table : colonnes, index et contraintes. */
+  dbTableSchema: (
+    driver: DbDriver,
+    host: string,
+    port: number,
+    user: string,
+    password: string,
+    database: string,
+    table: string,
+  ) =>
+    invoke<DbTableSchema>("db_table_schema", {
+      driver,
+      host,
+      port,
+      user,
+      password,
+      database,
+      table,
+    }),
+
+  /** Liste les noms de colonnes d'une table (listes déroulantes de structure). */
+  dbTableColumns: (
+    driver: DbDriver,
+    host: string,
+    port: number,
+    user: string,
+    password: string,
+    database: string,
+    table: string,
+  ) =>
+    invoke<string[]>("db_table_columns", {
+      driver,
+      host,
+      port,
+      user,
+      password,
+      database,
+      table,
+    }),
+
+  /** Applique des modifications de structure (colonnes, index, contraintes)
+   *  via ALTER TABLE / CREATE INDEX. */
+  dbAlterTable: (
+    driver: DbDriver,
+    host: string,
+    port: number,
+    user: string,
+    password: string,
+    database: string,
+    table: string,
+    changes: DbSchemaChange[],
+  ) =>
+    invoke<DbAlterResult>("db_alter_table", {
+      driver,
+      host,
+      port,
+      user,
+      password,
+      database,
+      table,
+      changes,
     }),
 
   /** Supprime les lignes sélectionnées (identifiées par leur clé primaire).

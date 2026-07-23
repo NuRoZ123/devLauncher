@@ -2419,6 +2419,1297 @@ fn my_table_rows(
 }
 
 // ---------------------------------------------------------------------------
+// Structure d'une table : colonnes détaillées, index et contraintes
+// ---------------------------------------------------------------------------
+
+/// Cible d'une clé étrangère, avec ses règles de propagation.
+#[derive(Serialize, Clone)]
+struct SchemaFk {
+    table: String,
+    column: String,
+    on_update: Option<String>,
+    on_delete: Option<String>,
+}
+
+/// Description complète d'une colonne (onglet « Structure »).
+#[derive(Serialize)]
+struct SchemaColumn {
+    name: String,
+    /// Position dans la table (1-based).
+    position: u32,
+    /// Type SQL complet tel que déclaré : « varchar(255) », « numeric(10,2) ».
+    full_type: String,
+    /// Type de base sans précision : « varchar », « int4 ».
+    base_type: String,
+    nullable: bool,
+    default: Option<String>,
+    /// Mentions supplémentaires : « auto_increment », « identity », « generated »…
+    extra: String,
+    comment: Option<String>,
+    primary_key: bool,
+    /// Couverte par une contrainte d'unicité (seule ou en tête d'index unique).
+    unique: bool,
+    /// Apparaît dans au moins un index.
+    indexed: bool,
+    fk: Option<SchemaFk>,
+    /// Valeurs possibles d'une colonne enum (vide sinon).
+    enum_values: Vec<String>,
+    collation: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SchemaIndex {
+    name: String,
+    unique: bool,
+    primary: bool,
+    /// Méthode d'indexation : « BTREE », « HASH », « gin »…
+    kind: String,
+    columns: Vec<String>,
+    /// Définition SQL complète (Postgres uniquement).
+    definition: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SchemaConstraint {
+    name: String,
+    /// « PRIMARY KEY », « UNIQUE », « FOREIGN KEY » ou « CHECK ».
+    kind: String,
+    columns: Vec<String>,
+    /// Cible d'une clé étrangère, au format « table(colonne) ».
+    references: Option<String>,
+    on_update: Option<String>,
+    on_delete: Option<String>,
+    /// Expression d'un CHECK, ou définition complète de la contrainte.
+    expression: Option<String>,
+}
+
+#[derive(Serialize)]
+struct TableSchema {
+    table: String,
+    /// Moteur de stockage (MariaDB/MySQL) ou type de relation (Postgres).
+    engine: Option<String>,
+    collation: Option<String>,
+    comment: Option<String>,
+    /// Nombre de lignes *estimé* par le moteur (statistiques, non exact).
+    est_rows: Option<i64>,
+    /// Taille totale (données + index), lisible.
+    size: Option<String>,
+    columns: Vec<SchemaColumn>,
+    indexes: Vec<SchemaIndex>,
+    constraints: Vec<SchemaConstraint>,
+}
+
+/// Taille en octets → texte lisible (« 12,4 Mo »).
+fn human_size(bytes: i64) -> String {
+    if bytes < 0 {
+        return String::new();
+    }
+    const UNITS: [&str; 5] = ["o", "Ko", "Mo", "Go", "To"];
+    let mut v = bytes as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u < UNITS.len() - 1 {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{bytes} o")
+    } else {
+        format!("{v:.1} {}", UNITS[u])
+    }
+}
+
+/// Lit la structure d'une table : colonnes (type, nullabilité, défaut, clés,
+/// commentaire…), index et contraintes.
+#[tauri::command]
+async fn db_table_schema(
+    driver: String,
+    host: String,
+    port: u16,
+    user: String,
+    password: String,
+    database: String,
+    table: String,
+) -> Result<TableSchema, String> {
+    tauri::async_runtime::spawn_blocking(move || match driver.as_str() {
+        "postgres" => pg_table_schema(&host, port, &user, &password, &database, &table),
+        "mariadb" | "mysql" => my_table_schema(&host, port, &user, &password, &database, &table),
+        other => Err(format!("Pilote inconnu : {other}")),
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn pg_table_schema(
+    host: &str,
+    port: u16,
+    user: &str,
+    password: &str,
+    database: &str,
+    table: &str,
+) -> Result<TableSchema, String> {
+    let mut client = pg_client(host, port, user, password, database)?;
+    let qualified = pg_qualify(table);
+
+    // --- Informations sur la relation elle-même ---
+    let rel = client
+        .query_one(
+            "SELECT obj_description(c.oid, 'pg_class'), \
+             c.reltuples::bigint, \
+             pg_total_relation_size(c.oid)::bigint, \
+             am.amname::text, \
+             (SELECT d.datcollate FROM pg_database d WHERE d.datname = current_database()) \
+             FROM pg_class c \
+             LEFT JOIN pg_am am ON am.oid = c.relam \
+             WHERE c.oid = ($1::text)::regclass",
+            &[&qualified],
+        )
+        .map_err(|e| format!("Table introuvable : {}", pg_err_msg(&e)))?;
+    let comment: Option<String> = rel.get(0);
+    let est_rows: Option<i64> = rel.get(1);
+    let size_bytes: Option<i64> = rel.get(2);
+    let engine: Option<String> = rel.get(3);
+    // Collation de la base : c'est elle que résout la collation « default » des
+    // colonnes, affichée une seule fois dans le résumé de la table.
+    let db_collation: Option<String> = rel.get(4);
+
+    // --- Colonnes ---
+    let col_rows = client
+        .query(
+            "SELECT a.attnum::int, \
+             a.attname::text, \
+             format_type(a.atttypid, a.atttypmod), \
+             t.typname::text, \
+             a.attnotnull, \
+             pg_get_expr(d.adbin, d.adrelid), \
+             (a.attidentity <> ''), \
+             col_description(a.attrelid, a.attnum), \
+             CASE WHEN t.typtype = 'e' THEN \
+               ARRAY(SELECT e.enumlabel::text FROM pg_enum e \
+                     WHERE e.enumtypid = t.oid ORDER BY e.enumsortorder) \
+               ELSE ARRAY[]::text[] END, \
+             (SELECT co.collname::text FROM pg_collation co WHERE co.oid = a.attcollation) \
+             FROM pg_attribute a \
+             JOIN pg_type t ON t.oid = a.atttypid \
+             LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
+             WHERE a.attrelid = ($1::text)::regclass AND a.attnum > 0 AND NOT a.attisdropped \
+             ORDER BY a.attnum",
+            &[&qualified],
+        )
+        .map_err(|e| format!("Lecture des colonnes échouée : {}", pg_err_msg(&e)))?;
+
+    // --- Contraintes (définition complète fournie par Postgres) ---
+    let con_rows = client
+        .query(
+            "SELECT c.conname::text, \
+             c.contype::text, \
+             pg_get_constraintdef(c.oid), \
+             ARRAY(SELECT a.attname::text \
+                   FROM unnest(c.conkey) WITH ORDINALITY AS u(num, ord) \
+                   JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = u.num \
+                   ORDER BY u.ord), \
+             ns.nspname::text, cl.relname::text, \
+             ARRAY(SELECT af.attname::text \
+                   FROM unnest(c.confkey) WITH ORDINALITY AS uf(num, ord) \
+                   JOIN pg_attribute af ON af.attrelid = c.confrelid AND af.attnum = uf.num \
+                   ORDER BY uf.ord), \
+             c.confupdtype::text, c.confdeltype::text \
+             FROM pg_constraint c \
+             LEFT JOIN pg_class cl ON cl.oid = c.confrelid \
+             LEFT JOIN pg_namespace ns ON ns.oid = cl.relnamespace \
+             WHERE c.conrelid = ($1::text)::regclass \
+             ORDER BY CASE c.contype WHEN 'p' THEN 0 WHEN 'u' THEN 1 WHEN 'f' THEN 2 ELSE 3 END, \
+             c.conname",
+            &[&qualified],
+        )
+        .map_err(|e| format!("Lecture des contraintes échouée : {}", pg_err_msg(&e)))?;
+
+    // Règle de propagation Postgres : lettre → libellé SQL.
+    let fk_rule = |c: &str| match c {
+        "a" => "NO ACTION",
+        "r" => "RESTRICT",
+        "c" => "CASCADE",
+        "n" => "SET NULL",
+        "d" => "SET DEFAULT",
+        _ => "NO ACTION",
+    };
+
+    let mut constraints: Vec<SchemaConstraint> = Vec::new();
+    let mut pk_cols: HashSet<String> = HashSet::new();
+    let mut uniq_cols: HashSet<String> = HashSet::new();
+    let mut fk_map: HashMap<String, SchemaFk> = HashMap::new();
+    for r in &con_rows {
+        let name: String = r.get(0);
+        let ctype: String = r.get(1);
+        let def: String = r.get(2);
+        let cols: Vec<String> = r.get(3);
+        let fschema: Option<String> = r.get(4);
+        let ftable: Option<String> = r.get(5);
+        let fcols: Vec<String> = r.get(6);
+        let upd: Option<String> = r.get(7);
+        let del: Option<String> = r.get(8);
+        let kind = match ctype.as_str() {
+            "p" => "PRIMARY KEY",
+            "u" => "UNIQUE",
+            "f" => "FOREIGN KEY",
+            "c" => "CHECK",
+            _ => "AUTRE",
+        };
+        match ctype.as_str() {
+            "p" => pk_cols.extend(cols.iter().map(|c| c.to_lowercase())),
+            "u" => uniq_cols.extend(cols.iter().map(|c| c.to_lowercase())),
+            _ => {}
+        }
+        // Cible d'une clé étrangère : « table(col1, col2) », schéma préfixé hors public.
+        let mut references = None;
+        if let (Some(ftable), false) = (&ftable, fcols.is_empty()) {
+            let full = match fschema.as_deref() {
+                Some("public") | None => ftable.clone(),
+                Some(s) => format!("{s}.{ftable}"),
+            };
+            references = Some(format!("{full}({})", fcols.join(", ")));
+            // Suivi de FK côté colonne : mono-colonne uniquement.
+            if ctype == "f" && cols.len() == 1 && fcols.len() == 1 {
+                fk_map.insert(
+                    cols[0].to_lowercase(),
+                    SchemaFk {
+                        table: full,
+                        column: fcols[0].clone(),
+                        on_update: upd.as_deref().map(|c| fk_rule(c).to_string()),
+                        on_delete: del.as_deref().map(|c| fk_rule(c).to_string()),
+                    },
+                );
+            }
+        }
+        constraints.push(SchemaConstraint {
+            name,
+            kind: kind.to_string(),
+            columns: cols,
+            references,
+            on_update: if ctype == "f" {
+                upd.as_deref().map(|c| fk_rule(c).to_string())
+            } else {
+                None
+            },
+            on_delete: if ctype == "f" {
+                del.as_deref().map(|c| fk_rule(c).to_string())
+            } else {
+                None
+            },
+            expression: Some(def),
+        });
+    }
+
+    // --- Index ---
+    let idx_rows = client
+        .query(
+            "SELECT i.relname::text, ix.indisunique, ix.indisprimary, am.amname::text, \
+             pg_get_indexdef(ix.indexrelid), \
+             ARRAY(SELECT pg_get_indexdef(ix.indexrelid, k, true) \
+                   FROM generate_series(1, ix.indnatts::int) AS k) \
+             FROM pg_index ix \
+             JOIN pg_class i ON i.oid = ix.indexrelid \
+             LEFT JOIN pg_am am ON am.oid = i.relam \
+             WHERE ix.indrelid = ($1::text)::regclass \
+             ORDER BY ix.indisprimary DESC, ix.indisunique DESC, i.relname",
+            &[&qualified],
+        )
+        .map_err(|e| format!("Lecture des index échouée : {}", pg_err_msg(&e)))?;
+    let mut indexes: Vec<SchemaIndex> = Vec::new();
+    let mut indexed_cols: HashSet<String> = HashSet::new();
+    for r in &idx_rows {
+        let cols: Vec<String> = r.get(5);
+        let unique: bool = r.get(1);
+        indexed_cols.extend(cols.iter().map(|c| c.to_lowercase()));
+        // Index unique mono-colonne : la colonne est unique même sans contrainte.
+        if unique && cols.len() == 1 {
+            uniq_cols.insert(cols[0].to_lowercase());
+        }
+        indexes.push(SchemaIndex {
+            name: r.get(0),
+            unique,
+            primary: r.get(2),
+            kind: r.get::<_, Option<String>>(3).unwrap_or_default(),
+            columns: cols,
+            definition: r.get(4),
+        });
+    }
+
+    let mut columns: Vec<SchemaColumn> = Vec::new();
+    for r in &col_rows {
+        let position: i32 = r.get(0);
+        let name: String = r.get(1);
+        let full_type: String = r.get(2);
+        let base_type: String = r.get(3);
+        let notnull: bool = r.get(4);
+        let default: Option<String> = r.get(5);
+        let is_identity: bool = r.get(6);
+        let comment: Option<String> = r.get(7);
+        let enum_values: Vec<String> = r.get(8);
+        let collation: Option<String> = r.get(9);
+        let key = name.to_lowercase();
+        let mut extra: Vec<&str> = Vec::new();
+        if is_identity {
+            extra.push("identity");
+        }
+        if default.as_deref().is_some_and(|d| d.starts_with("nextval(")) {
+            extra.push("auto-incrément");
+        }
+        columns.push(SchemaColumn {
+            position: position.max(0) as u32,
+            primary_key: pk_cols.contains(&key),
+            unique: uniq_cols.contains(&key),
+            indexed: indexed_cols.contains(&key),
+            fk: fk_map.get(&key).cloned(),
+            nullable: !notnull,
+            default,
+            extra: extra.join(", "),
+            comment,
+            enum_values,
+            collation,
+            name,
+            full_type,
+            base_type,
+        });
+    }
+
+    Ok(TableSchema {
+        table: table.to_string(),
+        engine,
+        collation: db_collation,
+        comment,
+        est_rows: est_rows.filter(|n| *n >= 0),
+        size: size_bytes.map(human_size),
+        columns,
+        indexes,
+        constraints,
+    })
+}
+
+fn my_table_schema(
+    host: &str,
+    port: u16,
+    user: &str,
+    password: &str,
+    database: &str,
+    table: &str,
+) -> Result<TableSchema, String> {
+    use mysql::prelude::Queryable;
+    let mut conn = my_conn(host, port, user, password, database)?;
+    // Toutes les valeurs passent par `my_value_to_string` : conversion tolérante,
+    // quel que soit le type renvoyé par le serveur (bytes, entiers…).
+    let cell = |row: &mysql::Row, i: usize| my_value_to_string(row.as_ref(i));
+    let num = |row: &mysql::Row, i: usize| cell(row, i).and_then(|s| s.parse::<i64>().ok());
+
+    // --- Informations sur la table ---
+    let info: Option<mysql::Row> = conn
+        .exec_first(
+            "SELECT ENGINE, TABLE_COLLATION, TABLE_COMMENT, TABLE_ROWS, \
+             (IFNULL(DATA_LENGTH, 0) + IFNULL(INDEX_LENGTH, 0)) \
+             FROM information_schema.TABLES \
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?",
+            (table,),
+        )
+        .map_err(|e| format!("Lecture de la table échouée : {e}"))?;
+    let (engine, collation, comment, est_rows, size) = match &info {
+        Some(r) => (
+            cell(r, 0),
+            cell(r, 1),
+            cell(r, 2).filter(|s| !s.is_empty()),
+            num(r, 3),
+            num(r, 4).map(human_size),
+        ),
+        None => (None, None, None, None, None),
+    };
+
+    // --- Contraintes (PK / UNIQUE / FK) ---
+    let con_rows: Vec<mysql::Row> = conn
+        .exec(
+            "SELECT tc.CONSTRAINT_NAME, tc.CONSTRAINT_TYPE, kcu.COLUMN_NAME, \
+             kcu.REFERENCED_TABLE_NAME, kcu.REFERENCED_COLUMN_NAME, \
+             rc.UPDATE_RULE, rc.DELETE_RULE \
+             FROM information_schema.TABLE_CONSTRAINTS tc \
+             JOIN information_schema.KEY_COLUMN_USAGE kcu \
+               ON kcu.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA \
+              AND kcu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME \
+              AND kcu.TABLE_NAME = tc.TABLE_NAME \
+             LEFT JOIN information_schema.REFERENTIAL_CONSTRAINTS rc \
+               ON rc.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA \
+              AND rc.CONSTRAINT_NAME = tc.CONSTRAINT_NAME \
+              AND rc.TABLE_NAME = tc.TABLE_NAME \
+             WHERE tc.TABLE_SCHEMA = DATABASE() AND tc.TABLE_NAME = ? \
+             ORDER BY FIELD(tc.CONSTRAINT_TYPE, 'PRIMARY KEY', 'UNIQUE', 'FOREIGN KEY'), \
+             tc.CONSTRAINT_NAME, kcu.ORDINAL_POSITION",
+            (table,),
+        )
+        .map_err(|e| format!("Lecture des contraintes échouée : {e}"))?;
+
+    // Les lignes arrivent à plat (une par colonne) : on regroupe par contrainte
+    // en conservant l'ordre de tri.
+    let mut constraints: Vec<SchemaConstraint> = Vec::new();
+    let mut pk_cols: HashSet<String> = HashSet::new();
+    let mut uniq_cols: HashSet<String> = HashSet::new();
+    let mut fk_map: HashMap<String, SchemaFk> = HashMap::new();
+    for r in &con_rows {
+        let name = cell(r, 0).unwrap_or_default();
+        let kind = cell(r, 1).unwrap_or_default();
+        let col = cell(r, 2).unwrap_or_default();
+        let ftable = cell(r, 3);
+        let fcol = cell(r, 4);
+        let upd = cell(r, 5);
+        let del = cell(r, 6);
+        match kind.as_str() {
+            "PRIMARY KEY" => {
+                pk_cols.insert(col.to_lowercase());
+            }
+            "UNIQUE" => {
+                uniq_cols.insert(col.to_lowercase());
+            }
+            "FOREIGN KEY" => {
+                if let (Some(t), Some(fc)) = (&ftable, &fcol) {
+                    fk_map.insert(
+                        col.to_lowercase(),
+                        SchemaFk {
+                            table: t.clone(),
+                            column: fc.clone(),
+                            on_update: upd.clone(),
+                            on_delete: del.clone(),
+                        },
+                    );
+                }
+            }
+            _ => {}
+        }
+        match constraints.last_mut() {
+            // Même contrainte que la ligne précédente : on ajoute la colonne.
+            Some(last) if last.name == name && last.kind == kind => {
+                last.columns.push(col);
+                if let (Some(t), Some(fc)) = (&ftable, &fcol) {
+                    last.references = Some(format!("{t}({fc})"));
+                }
+            }
+            _ => constraints.push(SchemaConstraint {
+                name,
+                kind,
+                columns: vec![col],
+                references: match (&ftable, &fcol) {
+                    (Some(t), Some(fc)) => Some(format!("{t}({fc})")),
+                    _ => None,
+                },
+                on_update: upd,
+                on_delete: del,
+                expression: None,
+            }),
+        }
+    }
+
+    // --- Contraintes CHECK (MariaDB 10.2+ / MySQL 8.0.16+) : absentes des
+    //     serveurs plus anciens, l'erreur est alors ignorée. ---
+    let check_rows: Vec<mysql::Row> = conn
+        .exec(
+            "SELECT tc.CONSTRAINT_NAME, cc.CHECK_CLAUSE \
+             FROM information_schema.TABLE_CONSTRAINTS tc \
+             JOIN information_schema.CHECK_CONSTRAINTS cc \
+               ON cc.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA \
+              AND cc.CONSTRAINT_NAME = tc.CONSTRAINT_NAME \
+             WHERE tc.TABLE_SCHEMA = DATABASE() AND tc.TABLE_NAME = ? \
+             AND tc.CONSTRAINT_TYPE = 'CHECK'",
+            (table,),
+        )
+        .unwrap_or_default();
+    for r in &check_rows {
+        constraints.push(SchemaConstraint {
+            name: cell(r, 0).unwrap_or_default(),
+            kind: "CHECK".into(),
+            columns: vec![],
+            references: None,
+            on_update: None,
+            on_delete: None,
+            expression: cell(r, 1),
+        });
+    }
+
+    // --- Index ---
+    let idx_rows: Vec<mysql::Row> = conn
+        .exec(
+            "SELECT INDEX_NAME, NON_UNIQUE, COLUMN_NAME, INDEX_TYPE \
+             FROM information_schema.STATISTICS \
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? \
+             ORDER BY (INDEX_NAME = 'PRIMARY') DESC, INDEX_NAME, SEQ_IN_INDEX",
+            (table,),
+        )
+        .map_err(|e| format!("Lecture des index échouée : {e}"))?;
+    let mut indexes: Vec<SchemaIndex> = Vec::new();
+    let mut indexed_cols: HashSet<String> = HashSet::new();
+    for r in &idx_rows {
+        let name = cell(r, 0).unwrap_or_default();
+        let unique = num(r, 1).unwrap_or(1) == 0;
+        // NULL pour un index fonctionnel (MySQL 8) : on affiche l'expression.
+        let col = cell(r, 2).unwrap_or_else(|| "(expression)".into());
+        indexed_cols.insert(col.to_lowercase());
+        match indexes.last_mut() {
+            Some(last) if last.name == name => last.columns.push(col),
+            _ => indexes.push(SchemaIndex {
+                primary: name == "PRIMARY",
+                name,
+                unique,
+                kind: cell(r, 3).unwrap_or_default(),
+                columns: vec![col],
+                definition: None,
+            }),
+        }
+    }
+    // Index unique mono-colonne : la colonne est unique même sans contrainte.
+    for idx in &indexes {
+        if idx.unique && idx.columns.len() == 1 {
+            uniq_cols.insert(idx.columns[0].to_lowercase());
+        }
+    }
+
+    // --- Colonnes ---
+    let col_rows: Vec<mysql::Row> = conn
+        .exec(
+            "SELECT COLUMN_NAME, ORDINAL_POSITION, COLUMN_TYPE, DATA_TYPE, IS_NULLABLE, \
+             COLUMN_DEFAULT, EXTRA, COLUMN_COMMENT, COLLATION_NAME \
+             FROM information_schema.COLUMNS \
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? \
+             ORDER BY ORDINAL_POSITION",
+            (table,),
+        )
+        .map_err(|e| format!("Lecture des colonnes échouée : {e}"))?;
+    if col_rows.is_empty() {
+        return Err(format!("Table introuvable : {table}"));
+    }
+    // MariaDB renvoie COLUMN_DEFAULT comme une *expression* SQL (« 'abc' ») ;
+    // MySQL 8 renvoie le littéral brut (« abc ») sauf pour les défauts calculés
+    // (marqués DEFAULT_GENERATED). On normalise pour que la valeur affichée soit
+    // toujours une expression SQL valide, réutilisable telle quelle en ALTER.
+    let is_mariadb = conn
+        .query_first::<String, _>("SELECT VERSION()")
+        .ok()
+        .flatten()
+        .is_some_and(|v| v.to_lowercase().contains("mariadb"));
+
+    let mut columns: Vec<SchemaColumn> = Vec::new();
+    for r in &col_rows {
+        let name = cell(r, 0).unwrap_or_default();
+        let full_type = cell(r, 2).unwrap_or_default();
+        let base_type = cell(r, 3).unwrap_or_default();
+        let key = name.to_lowercase();
+        let extra = cell(r, 6).unwrap_or_default();
+        let default = cell(r, 5).map(|d| {
+            let literal = !is_mariadb
+                && !extra.to_lowercase().contains("default_generated")
+                && my_kind_dt(&base_type) == ColKind::Text;
+            if literal {
+                my_quote_str(&d)
+            } else {
+                d
+            }
+        });
+        columns.push(SchemaColumn {
+            position: num(r, 1).unwrap_or(0).max(0) as u32,
+            nullable: cell(r, 4).is_some_and(|s| s.eq_ignore_ascii_case("YES")),
+            default,
+            extra,
+            comment: cell(r, 7).filter(|s| !s.is_empty()),
+            collation: cell(r, 8),
+            primary_key: pk_cols.contains(&key),
+            unique: uniq_cols.contains(&key),
+            indexed: indexed_cols.contains(&key),
+            fk: fk_map.get(&key).cloned(),
+            enum_values: if base_type == "enum" || base_type == "set" {
+                parse_mysql_enum(&full_type)
+            } else {
+                vec![]
+            },
+            name,
+            full_type,
+            base_type,
+        });
+    }
+
+    Ok(TableSchema {
+        table: table.to_string(),
+        engine,
+        collation,
+        comment,
+        est_rows,
+        size,
+        columns,
+        indexes,
+        constraints,
+    })
+}
+
+/// Liste les noms de colonnes d'une table, dans l'ordre de déclaration. Sert à
+/// alimenter les listes déroulantes de l'onglet « Structure » (cible d'une clé
+/// étrangère notamment) sans relire toute la structure.
+#[tauri::command]
+async fn db_table_columns(
+    driver: String,
+    host: String,
+    port: u16,
+    user: String,
+    password: String,
+    database: String,
+    table: String,
+) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || match driver.as_str() {
+        "postgres" => {
+            let mut client = pg_client(&host, port, &user, &password, &database)?;
+            let stmt = client
+                .prepare(&format!("SELECT * FROM {} LIMIT 0", pg_qualify(&table)))
+                .map_err(|e| format!("Table introuvable : {}", pg_err_msg(&e)))?;
+            Ok(stmt.columns().iter().map(|c| c.name().to_string()).collect())
+        }
+        "mariadb" | "mysql" => {
+            use mysql::prelude::Queryable;
+            let mut conn = my_conn(&host, port, &user, &password, &database)?;
+            let res = conn
+                .query_iter(format!("SELECT * FROM {} LIMIT 0", my_quote_ident(&table)))
+                .map_err(|e| format!("Table introuvable : {e}"))?;
+            Ok(res
+                .columns()
+                .as_ref()
+                .iter()
+                .map(|c| c.name_str().into_owned())
+                .collect())
+        }
+        other => Err(format!("Pilote inconnu : {other}")),
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ---------------------------------------------------------------------------
+// Modification de la structure : colonnes, index et contraintes
+// ---------------------------------------------------------------------------
+
+/// Une modification demandée depuis l'onglet « Structure ». Pour une colonne,
+/// `col_type`, `default` et `comment` décrivent l'état *voulu*.
+#[derive(Deserialize)]
+#[serde(tag = "op")]
+enum SchemaChange {
+    #[serde(rename = "col_add")]
+    ColAdd {
+        name: String,
+        #[serde(rename = "type")]
+        col_type: String,
+        nullable: bool,
+        default: Option<String>,
+        comment: Option<String>,
+    },
+    #[serde(rename = "col_modify")]
+    ColModify {
+        /// Nom actuel de la colonne (cible de l'ALTER).
+        name: String,
+        new_name: String,
+        #[serde(rename = "type")]
+        col_type: String,
+        /// Type actuel : si identique, aucune conversion de type n'est émise.
+        old_type: String,
+        nullable: bool,
+        default: Option<String>,
+        comment: Option<String>,
+        /// EXTRA MariaDB/MySQL à préserver (auto_increment, on update…).
+        extra: String,
+    },
+    #[serde(rename = "col_drop")]
+    ColDrop { name: String },
+    #[serde(rename = "idx_add")]
+    IdxAdd {
+        name: String,
+        unique: bool,
+        columns: Vec<String>,
+    },
+    #[serde(rename = "idx_drop")]
+    IdxDrop { name: String },
+    #[serde(rename = "con_add")]
+    ConAdd {
+        name: String,
+        /// « PRIMARY KEY », « UNIQUE », « FOREIGN KEY » ou « CHECK ».
+        kind: String,
+        columns: Vec<String>,
+        ref_table: Option<String>,
+        ref_columns: Vec<String>,
+        on_update: Option<String>,
+        on_delete: Option<String>,
+        /// Expression d'un CHECK.
+        expression: Option<String>,
+    },
+    #[serde(rename = "con_drop")]
+    ConDrop { name: String, kind: String },
+}
+
+/// Ordre d'exécution : on libère (contraintes puis index) avant de toucher aux
+/// colonnes, et on recrée à la fin, une fois les colonnes en place.
+fn change_rank(c: &SchemaChange) -> u8 {
+    match c {
+        SchemaChange::ConDrop { .. } => 0,
+        SchemaChange::IdxDrop { .. } => 1,
+        SchemaChange::ColModify { .. } => 2,
+        SchemaChange::ColAdd { .. } => 3,
+        SchemaChange::ColDrop { .. } => 4,
+        SchemaChange::IdxAdd { .. } => 5,
+        SchemaChange::ConAdd { .. } => 6,
+    }
+}
+
+/// Trie les modifications dans l'ordre d'exécution (tri stable : à rang égal,
+/// l'ordre de saisie est conservé).
+fn ordered_changes(changes: &[SchemaChange]) -> Vec<&SchemaChange> {
+    let mut v: Vec<&SchemaChange> = changes.iter().collect();
+    v.sort_by_key(|c| change_rank(c));
+    v
+}
+
+/// Valide le type d'une contrainte et le normalise en majuscules.
+fn check_con_kind(kind: &str) -> Result<String, String> {
+    let k = kind.trim().to_uppercase();
+    match k.as_str() {
+        "PRIMARY KEY" | "UNIQUE" | "FOREIGN KEY" | "CHECK" => Ok(k),
+        _ => Err(format!("Type de contrainte inconnu : « {kind} »")),
+    }
+}
+
+/// Valide une règle de propagation de clé étrangère (liste blanche).
+fn check_fk_rule(rule: &str) -> Result<String, String> {
+    let r = rule.trim().to_uppercase();
+    match r.as_str() {
+        "CASCADE" | "RESTRICT" | "SET NULL" | "SET DEFAULT" | "NO ACTION" => Ok(r),
+        _ => Err(format!("Règle de clé étrangère inconnue : « {rule} »")),
+    }
+}
+
+/// Liste de colonnes citées, refusant une liste vide.
+fn quote_cols(cols: &[String], quote: fn(&str) -> String) -> Result<String, String> {
+    if cols.is_empty() {
+        return Err("Aucune colonne indiquée.".into());
+    }
+    for c in cols {
+        check_ident(c)?;
+    }
+    Ok(cols.iter().map(|c| quote(c)).collect::<Vec<_>>().join(", "))
+}
+
+/// Corps d'une contrainte : « PRIMARY KEY (…) », « FOREIGN KEY (…) REFERENCES … ».
+/// `quote_ident` cite une colonne, `quote_table` la table référencée.
+fn constraint_body(
+    kind: &str,
+    columns: &[String],
+    ref_table: Option<&str>,
+    ref_columns: &[String],
+    on_update: Option<&str>,
+    on_delete: Option<&str>,
+    expression: Option<&str>,
+    quote_ident: fn(&str) -> String,
+    quote_table: fn(&str) -> String,
+) -> Result<String, String> {
+    match kind {
+        "PRIMARY KEY" => Ok(format!("PRIMARY KEY ({})", quote_cols(columns, quote_ident)?)),
+        "UNIQUE" => Ok(format!("UNIQUE ({})", quote_cols(columns, quote_ident)?)),
+        "CHECK" => {
+            let e = expression.unwrap_or("").trim();
+            check_sql_fragment("Expression du CHECK", e)?;
+            Ok(format!("CHECK ({e})"))
+        }
+        "FOREIGN KEY" => {
+            let rt = ref_table
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .ok_or("Clé étrangère sans table référencée.")?;
+            check_ident(rt)?;
+            let mut s = format!(
+                "FOREIGN KEY ({}) REFERENCES {} ({})",
+                quote_cols(columns, quote_ident)?,
+                quote_table(rt),
+                quote_cols(ref_columns, quote_ident)?
+            );
+            if let Some(r) = on_delete.map(str::trim).filter(|r| !r.is_empty()) {
+                s.push_str(" ON DELETE ");
+                s.push_str(&check_fk_rule(r)?);
+            }
+            if let Some(r) = on_update.map(str::trim).filter(|r| !r.is_empty()) {
+                s.push_str(" ON UPDATE ");
+                s.push_str(&check_fk_rule(r)?);
+            }
+            Ok(s)
+        }
+        _ => Err(format!("Type de contrainte inconnu : « {kind} »")),
+    }
+}
+
+#[derive(Serialize)]
+struct AlterResult {
+    added: u32,
+    modified: u32,
+    dropped: u32,
+    /// Instructions réellement exécutées (journalisées côté interface).
+    statements: Vec<String>,
+}
+
+/// Littéral texte MariaDB/MySQL.
+fn my_quote_str(s: &str) -> String {
+    format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''"))
+}
+
+/// Littéral texte Postgres.
+fn pg_quote_str(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+/// Identifiant Postgres cité.
+fn pg_quote_ident(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\"\""))
+}
+
+/// Identifiant MariaDB/MySQL cité.
+fn my_quote_ident(s: &str) -> String {
+    format!("`{}`", s.replace('`', "``"))
+}
+
+/// Garde-fou sur un fragment SQL saisi à la main (type, expression par défaut) :
+/// ces morceaux ne peuvent pas être passés en paramètre lié dans du DDL, on
+/// interdit donc tout ce qui permettrait d'enchaîner une autre instruction.
+fn check_sql_fragment(what: &str, s: &str) -> Result<(), String> {
+    let t = s.trim();
+    if t.is_empty() {
+        return Err(format!("{what} vide."));
+    }
+    if t.contains(';') || t.contains("--") || t.contains("/*") || t.contains('\0') {
+        return Err(format!("{what} invalide : « {s} »"));
+    }
+    Ok(())
+}
+
+/// Vérifie qu'un nom de colonne est utilisable tel quel (le citer suffit à le
+/// rendre sûr, mais on écarte les cas manifestement erronés).
+fn check_ident(name: &str) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err("Nom de colonne vide.".into());
+    }
+    if name.contains('\0') {
+        return Err(format!("Nom de colonne invalide : « {name} »"));
+    }
+    Ok(())
+}
+
+/// Applique des modifications de structure (colonnes, index, contraintes).
+/// Postgres : le tout dans une transaction. MariaDB/MySQL : le DDL déclenche un
+/// commit implicite, les instructions sont donc jouées en série et l'exécution
+/// s'arrête à la première erreur (les précédentes restent acquises).
+#[tauri::command]
+async fn db_alter_table(
+    driver: String,
+    host: String,
+    port: u16,
+    user: String,
+    password: String,
+    database: String,
+    table: String,
+    changes: Vec<SchemaChange>,
+) -> Result<AlterResult, String> {
+    tauri::async_runtime::spawn_blocking(move || match driver.as_str() {
+        "postgres" => pg_alter_table(&host, port, &user, &password, &database, &table, &changes),
+        "mariadb" | "mysql" => {
+            my_alter_table(&host, port, &user, &password, &database, &table, &changes)
+        }
+        other => Err(format!("Pilote inconnu : {other}")),
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Définition complète d'une colonne MariaDB/MySQL (utilisée par ADD et CHANGE).
+fn my_col_def(
+    col_type: &str,
+    nullable: bool,
+    default: Option<&str>,
+    comment: Option<&str>,
+    extra: &str,
+) -> Result<String, String> {
+    check_sql_fragment("Type", col_type)?;
+    let mut s = col_type.trim().to_string();
+    s.push_str(if nullable { " NULL" } else { " NOT NULL" });
+    if let Some(d) = default.map(str::trim).filter(|d| !d.is_empty()) {
+        check_sql_fragment("Valeur par défaut", d)?;
+        s.push_str(" DEFAULT ");
+        s.push_str(d);
+    }
+    // EXTRA n'est pas modifiable ici mais doit être reconduit, sinon CHANGE
+    // COLUMN le supprimerait silencieusement.
+    let extra_lc = extra.to_lowercase();
+    if extra_lc.contains("auto_increment") {
+        s.push_str(" AUTO_INCREMENT");
+    }
+    if extra_lc.contains("on update current_timestamp") {
+        s.push_str(" ON UPDATE CURRENT_TIMESTAMP");
+    }
+    if let Some(c) = comment {
+        s.push_str(" COMMENT ");
+        s.push_str(&my_quote_str(c));
+    }
+    Ok(s)
+}
+
+fn my_alter_table(
+    host: &str,
+    port: u16,
+    user: &str,
+    password: &str,
+    database: &str,
+    table: &str,
+    changes: &[SchemaChange],
+) -> Result<AlterResult, String> {
+    use mysql::prelude::Queryable;
+    let quoted = my_quote_ident(table);
+    // Construction de toutes les instructions d'abord : une saisie invalide
+    // échoue avant d'avoir touché la base.
+    let mut stmts: Vec<String> = Vec::new();
+    let (mut added, mut modified, mut dropped) = (0u32, 0u32, 0u32);
+    for ch in ordered_changes(changes) {
+        match ch {
+            SchemaChange::ColAdd {
+                name,
+                col_type,
+                nullable,
+                default,
+                comment,
+            } => {
+                check_ident(name)?;
+                let def = my_col_def(col_type, *nullable, default.as_deref(), comment.as_deref(), "")?;
+                stmts.push(format!(
+                    "ALTER TABLE {quoted} ADD COLUMN {} {def}",
+                    my_quote_ident(name)
+                ));
+                added += 1;
+            }
+            SchemaChange::ColModify {
+                name,
+                new_name,
+                col_type,
+                nullable,
+                default,
+                comment,
+                extra,
+                ..
+            } => {
+                check_ident(name)?;
+                check_ident(new_name)?;
+                let def = my_col_def(
+                    col_type,
+                    *nullable,
+                    default.as_deref(),
+                    comment.as_deref(),
+                    extra,
+                )?;
+                stmts.push(format!(
+                    "ALTER TABLE {quoted} CHANGE COLUMN {} {} {def}",
+                    my_quote_ident(name),
+                    my_quote_ident(new_name)
+                ));
+                modified += 1;
+            }
+            SchemaChange::ColDrop { name } => {
+                check_ident(name)?;
+                stmts.push(format!(
+                    "ALTER TABLE {quoted} DROP COLUMN {}",
+                    my_quote_ident(name)
+                ));
+                dropped += 1;
+            }
+            SchemaChange::IdxAdd {
+                name,
+                unique,
+                columns,
+            } => {
+                check_ident(name)?;
+                stmts.push(format!(
+                    "CREATE {}INDEX {} ON {quoted} ({})",
+                    if *unique { "UNIQUE " } else { "" },
+                    my_quote_ident(name),
+                    quote_cols(columns, my_quote_ident)?
+                ));
+                added += 1;
+            }
+            SchemaChange::IdxDrop { name } => {
+                check_ident(name)?;
+                stmts.push(format!(
+                    "DROP INDEX {} ON {quoted}",
+                    my_quote_ident(name)
+                ));
+                dropped += 1;
+            }
+            SchemaChange::ConAdd {
+                name,
+                kind,
+                columns,
+                ref_table,
+                ref_columns,
+                on_update,
+                on_delete,
+                expression,
+            } => {
+                let k = check_con_kind(kind)?;
+                let body = constraint_body(
+                    &k,
+                    columns,
+                    ref_table.as_deref(),
+                    ref_columns,
+                    on_update.as_deref(),
+                    on_delete.as_deref(),
+                    expression.as_deref(),
+                    my_quote_ident,
+                    my_quote_ident,
+                )?;
+                // MariaDB/MySQL nomme toujours la clé primaire « PRIMARY » :
+                // un nom de contrainte y serait ignoré.
+                if k == "PRIMARY KEY" {
+                    stmts.push(format!("ALTER TABLE {quoted} ADD {body}"));
+                } else {
+                    check_ident(name)?;
+                    stmts.push(format!(
+                        "ALTER TABLE {quoted} ADD CONSTRAINT {} {body}",
+                        my_quote_ident(name)
+                    ));
+                }
+                added += 1;
+            }
+            SchemaChange::ConDrop { name, kind } => {
+                // Chaque type de contrainte a sa propre syntaxe de suppression.
+                let k = check_con_kind(kind)?;
+                stmts.push(match k.as_str() {
+                    "PRIMARY KEY" => format!("ALTER TABLE {quoted} DROP PRIMARY KEY"),
+                    "FOREIGN KEY" => {
+                        check_ident(name)?;
+                        format!(
+                            "ALTER TABLE {quoted} DROP FOREIGN KEY {}",
+                            my_quote_ident(name)
+                        )
+                    }
+                    "CHECK" => {
+                        check_ident(name)?;
+                        format!("ALTER TABLE {quoted} DROP CHECK {}", my_quote_ident(name))
+                    }
+                    // UNIQUE est porté par un index du même nom.
+                    _ => {
+                        check_ident(name)?;
+                        format!("ALTER TABLE {quoted} DROP INDEX {}", my_quote_ident(name))
+                    }
+                });
+                dropped += 1;
+            }
+        }
+    }
+    let mut conn = my_conn(host, port, user, password, database)?;
+    let mut done: Vec<String> = Vec::new();
+    for s in stmts {
+        conn.query_drop(&s).map_err(|e| {
+            format!(
+                "{e}\n(instruction : {s})\n{} modification(s) déjà appliquée(s).",
+                done.len()
+            )
+        })?;
+        done.push(s);
+    }
+    Ok(AlterResult {
+        added,
+        modified,
+        dropped,
+        statements: done,
+    })
+}
+
+fn pg_alter_table(
+    host: &str,
+    port: u16,
+    user: &str,
+    password: &str,
+    database: &str,
+    table: &str,
+    changes: &[SchemaChange],
+) -> Result<AlterResult, String> {
+    let qualified = pg_qualify(table);
+    // Un index vit dans le schéma de sa table : DROP INDEX doit le qualifier.
+    let index_ref = |name: &str| match table.split_once('.') {
+        Some((schema, _)) => format!("{}.{}", pg_quote_ident(schema), pg_quote_ident(name)),
+        None => pg_quote_ident(name),
+    };
+    let mut stmts: Vec<String> = Vec::new();
+    let (mut added, mut modified, mut dropped) = (0u32, 0u32, 0u32);
+    for ch in ordered_changes(changes) {
+        match ch {
+            SchemaChange::ColAdd {
+                name,
+                col_type,
+                nullable,
+                default,
+                comment,
+            } => {
+                check_ident(name)?;
+                check_sql_fragment("Type", col_type)?;
+                let col = pg_quote_ident(name);
+                let mut s = format!(
+                    "ALTER TABLE {qualified} ADD COLUMN {col} {}",
+                    col_type.trim()
+                );
+                if !*nullable {
+                    s.push_str(" NOT NULL");
+                }
+                if let Some(d) = default.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+                    check_sql_fragment("Valeur par défaut", d)?;
+                    s.push_str(" DEFAULT ");
+                    s.push_str(d);
+                }
+                stmts.push(s);
+                if let Some(c) = comment {
+                    stmts.push(format!(
+                        "COMMENT ON COLUMN {qualified}.{col} IS {}",
+                        pg_quote_str(c)
+                    ));
+                }
+                added += 1;
+            }
+            SchemaChange::ColModify {
+                name,
+                new_name,
+                col_type,
+                old_type,
+                nullable,
+                default,
+                comment,
+                ..
+            } => {
+                check_ident(name)?;
+                check_ident(new_name)?;
+                check_sql_fragment("Type", col_type)?;
+                // Le renommage passe en premier : les instructions suivantes
+                // désignent la colonne par son nouveau nom.
+                if new_name != name {
+                    stmts.push(format!(
+                        "ALTER TABLE {qualified} RENAME COLUMN {} TO {}",
+                        pg_quote_ident(name),
+                        pg_quote_ident(new_name)
+                    ));
+                }
+                let col = pg_quote_ident(new_name);
+                // Une conversion de type réécrit la table : uniquement si besoin.
+                if col_type.trim() != old_type.trim() {
+                    let t = col_type.trim();
+                    stmts.push(format!(
+                        "ALTER TABLE {qualified} ALTER COLUMN {col} TYPE {t} USING {col}::{t}"
+                    ));
+                }
+                stmts.push(format!(
+                    "ALTER TABLE {qualified} ALTER COLUMN {col} {} NOT NULL",
+                    if *nullable { "DROP" } else { "SET" }
+                ));
+                match default.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+                    Some(d) => {
+                        check_sql_fragment("Valeur par défaut", d)?;
+                        stmts.push(format!(
+                            "ALTER TABLE {qualified} ALTER COLUMN {col} SET DEFAULT {d}"
+                        ));
+                    }
+                    None => stmts.push(format!(
+                        "ALTER TABLE {qualified} ALTER COLUMN {col} DROP DEFAULT"
+                    )),
+                }
+                stmts.push(format!(
+                    "COMMENT ON COLUMN {qualified}.{col} IS {}",
+                    match comment {
+                        Some(c) => pg_quote_str(c),
+                        None => "NULL".to_string(),
+                    }
+                ));
+                modified += 1;
+            }
+            SchemaChange::ColDrop { name } => {
+                check_ident(name)?;
+                stmts.push(format!(
+                    "ALTER TABLE {qualified} DROP COLUMN {}",
+                    pg_quote_ident(name)
+                ));
+                dropped += 1;
+            }
+            SchemaChange::IdxAdd {
+                name,
+                unique,
+                columns,
+            } => {
+                check_ident(name)?;
+                stmts.push(format!(
+                    "CREATE {}INDEX {} ON {qualified} ({})",
+                    if *unique { "UNIQUE " } else { "" },
+                    pg_quote_ident(name),
+                    quote_cols(columns, pg_quote_ident)?
+                ));
+                added += 1;
+            }
+            SchemaChange::IdxDrop { name } => {
+                check_ident(name)?;
+                stmts.push(format!("DROP INDEX {}", index_ref(name)));
+                dropped += 1;
+            }
+            SchemaChange::ConAdd {
+                name,
+                kind,
+                columns,
+                ref_table,
+                ref_columns,
+                on_update,
+                on_delete,
+                expression,
+            } => {
+                check_ident(name)?;
+                let k = check_con_kind(kind)?;
+                let body = constraint_body(
+                    &k,
+                    columns,
+                    ref_table.as_deref(),
+                    ref_columns,
+                    on_update.as_deref(),
+                    on_delete.as_deref(),
+                    expression.as_deref(),
+                    pg_quote_ident,
+                    |t| pg_qualify(t),
+                )?;
+                stmts.push(format!(
+                    "ALTER TABLE {qualified} ADD CONSTRAINT {} {body}",
+                    pg_quote_ident(name)
+                ));
+                added += 1;
+            }
+            SchemaChange::ConDrop { name, .. } => {
+                check_ident(name)?;
+                stmts.push(format!(
+                    "ALTER TABLE {qualified} DROP CONSTRAINT {}",
+                    pg_quote_ident(name)
+                ));
+                dropped += 1;
+            }
+        }
+    }
+    let mut client = pg_client(host, port, user, password, database)?;
+    // Le DDL Postgres est transactionnel : tout passe, ou rien.
+    let mut tx = client
+        .transaction()
+        .map_err(|e| format!("Transaction impossible : {}", pg_err_msg(&e)))?;
+    for s in &stmts {
+        tx.batch_execute(s)
+            .map_err(|e| format!("{}\n(instruction : {s})", pg_err_msg(&e)))?;
+    }
+    tx.commit()
+        .map_err(|e| format!("Validation échouée : {}", pg_err_msg(&e)))?;
+    Ok(AlterResult {
+        added,
+        modified,
+        dropped,
+        statements: stmts,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Suppression de lignes sélectionnées (par clé primaire)
 // ---------------------------------------------------------------------------
 
@@ -3156,6 +4447,9 @@ pub fn run() {
             db_connect,
             db_tables,
             db_table_rows,
+            db_table_schema,
+            db_table_columns,
+            db_alter_table,
             db_delete_rows,
             db_update_cell,
             db_apply_changes
