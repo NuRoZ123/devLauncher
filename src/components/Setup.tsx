@@ -1,25 +1,27 @@
 import { useState } from "react";
-import { pickBashExe, pickFolder } from "../api";
+import { pickBashExe } from "../api";
 import { DEFAULT_GIT_BASH, START_COMMAND_PLACEHOLDER } from "../constants";
+import { ProjectSources } from "./ProjectSources";
+import type { ProjectSource } from "../types";
 
 interface Props {
-  initialRoot?: string;
+  initialSources?: ProjectSource[];
   initialBash?: string;
   initialCommand?: string;
-  onSubmit: (root: string, bash: string, startCommand: string) => void;
+  onSubmit: (sources: ProjectSource[], bash: string, startCommand: string) => void;
 }
 
 export function Setup({
-  initialRoot = "",
+  initialSources = [],
   initialBash = DEFAULT_GIT_BASH,
   initialCommand = "",
   onSubmit,
 }: Props) {
-  const [root, setRoot] = useState(initialRoot);
+  const [sources, setSources] = useState<ProjectSource[]>(initialSources);
   const [bash, setBash] = useState(initialBash);
   const [command, setCommand] = useState(initialCommand);
 
-  const valid = root.trim().length > 0 && bash.trim().length > 0 && command.trim().length > 0;
+  const valid = sources.length > 0 && bash.trim().length > 0 && command.trim().length > 0;
 
   return (
     <div className="setup">
@@ -27,32 +29,17 @@ export function Setup({
         <div className="setup-logo">⚡</div>
         <h1>DevLauncher</h1>
         <p className="muted">
-          Première configuration. Indiquez la racine de votre architecture,
-          l'emplacement de Git Bash et la commande de démarrage des services.
+          Première configuration. Déclarez vos projets, indiquez l'emplacement de Git Bash et la
+          commande de démarrage des services.
         </p>
 
         <label className="field">
-          <span>Dossier racine des projets</span>
+          <span>Projets</span>
           <small className="muted">
-            Le dossier qui contient <code>services/</code>, <code>packages/</code> et{" "}
-            <code>portail-occupant/</code>
+            Ajoutez un <b>projet</b> (un dossier = un projet), ou un <b>dossier parent</b> dont
+            chaque sous-dossier devient un projet à typer (Service, Front ou Package).
           </small>
-          <div className="field-row">
-            <input
-              value={root}
-              onChange={(e) => setRoot(e.target.value)}
-              placeholder="C:\dev\mon-archi"
-            />
-            <button
-              className="btn"
-              onClick={async () => {
-                const p = await pickFolder("Choisir la racine des projets");
-                if (p) setRoot(p);
-              }}
-            >
-              Parcourir…
-            </button>
-          </div>
+          <ProjectSources sources={sources} onChange={setSources} />
         </label>
 
         <label className="field">
@@ -96,7 +83,7 @@ export function Setup({
         <button
           className="btn btn-primary btn-block"
           disabled={!valid}
-          onClick={() => onSubmit(root.trim(), bash.trim(), command.trim())}
+          onClick={() => onSubmit(sources, bash.trim(), command.trim())}
         >
           Démarrer
         </button>

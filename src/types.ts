@@ -1,5 +1,28 @@
 export type ProjectKind = "service" | "package" | "front";
 
+/**
+ * Une *source* déclarée par l'utilisateur : d'où viennent les projets.
+ * - `mode: "single"` → le dossier `path` est lui-même un projet, de type `type`.
+ * - `mode: "parent"` → chaque sous-dossier de `path` devient un projet ; son type
+ *   est `overrides[nomSousDossier]` s'il existe (`"ignored"` = exclu), sinon
+ *   `defaultType`. Rescannée dynamiquement : un nouveau sous-dossier apparaît seul.
+ */
+export interface ProjectSource {
+  /** Identifiant stable de la source (attribué à la création). */
+  id: string;
+  /** Dossier choisi par l'utilisateur. */
+  path: string;
+  mode: "single" | "parent";
+  /** Nom d'affichage optionnel (défaut = nom du dossier). */
+  label?: string;
+  /** (single) Type du projet. */
+  type?: ProjectKind;
+  /** (parent) Type appliqué aux sous-dossiers sans exception. */
+  defaultType?: ProjectKind;
+  /** (parent) Type précis, ou exclusion, par nom de sous-dossier. */
+  overrides?: Record<string, ProjectKind | "ignored">;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -330,7 +353,14 @@ export interface DbAlterResult {
 }
 
 export interface Config {
+  /**
+   * Ancienne racine unique (archi services/ + packages/ + portail-occupant).
+   * Conservée pour la rétrocompat et la migration vers `sources` ; n'est plus
+   * utilisée pour le scan une fois les sources renseignées.
+   */
   projects_root: string;
+  /** Sources des projets : projets uniques et/ou dossiers parents typés. */
+  sources: ProjectSource[];
   git_bash_path: string;
   /** Commande de démarrage par défaut (ex. "npm run start", "./startup.sh"). */
   start_command: string;
@@ -342,6 +372,12 @@ export interface Config {
   action_colors: Record<string, string>;
   /** Vrai une fois les actions par défaut semées (évite leur réapparition). */
   actions_seeded: boolean;
+  /**
+   * Vrai une fois les sources initialisées (migration de l'ancienne racine
+   * effectuée, ou config créée avec des sources) : évite de re-migrer si
+   * l'utilisateur retire ensuite toutes ses sources.
+   */
+  sources_migrated?: boolean;
   /** Connexions BDD par service : id de projet → mapping des clés .env. */
   db_connections: Record<string, DbConnection>;
   /** Nombre de lignes affichées par défaut dans l'aperçu d'une table. */

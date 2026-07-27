@@ -21,6 +21,7 @@ import type {
   PkgMeta,
   PortInfo,
   Project,
+  ProjectSource,
   ServiceDep,
   StatusEvent,
   TestResult,
@@ -30,8 +31,14 @@ export const api = {
   loadConfig: () => invoke<Config | null>("load_config"),
   saveConfig: (config: Config) => invoke<void>("save_config", { config }),
 
-  scanProjects: (root: string, startCommand: string, commandOverrides: Record<string, string>) =>
-    invoke<Project[]>("scan_projects", { root, startCommand, commandOverrides }),
+  scanProjects: (
+    sources: ProjectSource[],
+    startCommand: string,
+    commandOverrides: Record<string, string>,
+  ) => invoke<Project[]>("scan_projects", { sources, startCommand, commandOverrides }),
+
+  /** Liste les sous-dossiers directs d'un dossier (typage d'un dossier parent). */
+  listSubdirs: (path: string) => invoke<string[]>("list_subdirs", { path }),
 
   gitInfo: (bash: string, path: string) =>
     invoke<GitInfo>("git_info", { bash, path }),
@@ -66,8 +73,8 @@ export const api = {
   readEnv: (path: string) => invoke<string>("read_env", { path }),
   saveEnv: (path: string, content: string) =>
     invoke<void>("save_env", { path, content }),
-  packageLinks: (root: string, depName: string) =>
-    invoke<ServiceDep[]>("package_links", { root, depName }),
+  packageLinks: (services: { id: string; name: string; path: string }[], depName: string) =>
+    invoke<ServiceDep[]>("package_links", { services, depName }),
 
   /** Teste une connexion BDD (valeurs résolues depuis le .env). Renvoie la
    *  version du serveur si OK, rejette avec un message sinon. */

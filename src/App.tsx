@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, autostart, onLogs, onStatus, pickBashExe, pickFolder } from "./api";
+import { api, autostart, onLogs, onStatus, pickBashExe } from "./api";
 import { BranchModal, type BranchModalState } from "./components/BranchModal";
 import { Console } from "./components/Console";
 import { ColorPicker } from "./components/ColorPicker";
@@ -12,6 +12,7 @@ import { DbRelationsView, type DbGraphState } from "./components/DbRelationsView
 import { EnvModal, type EnvModalState } from "./components/EnvModal";
 import { PackageLinkModal, type LinkModalState } from "./components/PackageLinkModal";
 import { ProjectRow } from "./components/ProjectRow";
+import { ProjectSources } from "./components/ProjectSources";
 import { SequenceManager } from "./components/SequenceManager";
 import { Setup } from "./components/Setup";
 import { StartCommandModal } from "./components/StartCommandModal";
@@ -42,6 +43,7 @@ import type {
   PortInfo,
   Project,
   ProjectKind,
+  ProjectSource,
   QJob,
   Sequence,
   ServiceDep,
@@ -101,12 +103,53 @@ const MAX_LINES = 5000;
 // Identité stable pour « aucune exception » (évite de relancer le scan pour rien).
 const NO_OVERRIDES: Record<string, string> = {};
 const NO_COLORS: Record<string, string> = {};
+const NO_SOURCES: ProjectSource[] = [];
 const KIND_ORDER: ProjectKind[] = ["service", "front", "package"];
+
+/** Assemble un chemin en respectant le séparateur du dossier racine. */
+function joinPath(root: string, sub: string): string {
+  const sep = root.includes("/") && !root.includes("\\") ? "/" : "\\";
+  return root.replace(/[\\/]+$/, "") + sep + sub;
+}
+
+/**
+ * Migration des anciennes configs (racine unique) vers des sources : reproduit
+ * l'archi historique — `services/` (dossier parent, type service),
+ * `portail-occupant` (projet front), `packages/` (dossier parent, type package).
+ * Les sources vers un dossier absent ne produisent rien au scan.
+ */
+function migrateSources(root: string): ProjectSource[] {
+  if (!root.trim()) return [];
+  return [
+    {
+      id: "legacy-services",
+      path: joinPath(root, "services"),
+      mode: "parent",
+      defaultType: "service",
+      overrides: {},
+    },
+    { id: "legacy-front", path: joinPath(root, "portail-occupant"), mode: "single", type: "front" },
+    {
+      id: "legacy-packages",
+      path: joinPath(root, "packages"),
+      mode: "parent",
+      defaultType: "package",
+      overrides: {},
+    },
+  ];
+}
 const KIND_TITLE: Record<ProjectKind, string> = {
   service: "Services",
   front: "Front",
   package: "Packages",
 };
+
+/** Réduit une liste de projets aux références de services attendues par `package_links`. */
+function servicesForLinks(list: Project[]): { id: string; name: string; path: string }[] {
+  return list
+    .filter((p) => p.kind === "service")
+    .map((p) => ({ id: p.id, name: p.name, path: p.path }));
+}
 
 export default function App() {
   const [config, setConfig] = useState<Config | null>(null);
@@ -258,7 +301,7 @@ export default function App() {
   }, [dbWs, jobsOpen, view]);
 
   const bash = config?.git_bash_path ?? DEFAULT_GIT_BASH;
-  const root = config?.projects_root ?? "";
+  const sources = config?.sources ?? NO_SOURCES;
   const startCmd = config?.start_command ?? "";
   const cmdOverrides = config?.command_overrides ?? NO_OVERRIDES;
   const sequences = config?.sequences ?? [];
@@ -278,15 +321,22 @@ export default function App() {
     api.loadConfig().then((c) => {
       // La commande de démarrage fait partie de la config minimale : si elle
       // manque (ancienne config), on repasse par l'écran Setup pré-rempli.
-      if (c && c.projects_root && c.start_command) {
+      // (On ne dépend plus de projects_root : les nouvelles configs n'en ont pas.)
+      if (c && c.start_command) {
         // Les actions par défaut ne sont semées qu'une seule fois : après quoi
         // le drapeau est persisté, et les suppressions de l'utilisateur tiennent.
         const alreadySeeded = c.actions_seeded ?? false;
+        // Migration à effectuer : jamais migré, aucune source, mais une ancienne
+        // racine unique existe. Une fois migré (drapeau posé), on ne re-migre pas,
+        // même si l'utilisateur retire ensuite toutes ses sources.
+        const needsMigration = !c.sources_migrated && !c.sources?.length && !!c.projects_root;
         // Spread d'abord : préserve tout champ non listé ici (ex. db_layouts),
         // qui serait sinon perdu au démarrage puis effacé à la 1re écriture.
         const next: Config = {
           ...c,
           projects_root: c.projects_root,
+          sources: needsMigration ? migrateSources(c.projects_root) : (c.sources ?? []),
+          sources_migrated: true,
           git_bash_path: c.git_bash_path || DEFAULT_GIT_BASH,
           start_command: c.start_command,
           command_overrides: c.command_overrides ?? NO_OVERRIDES,
@@ -299,7 +349,8 @@ export default function App() {
           db_disabled: c.db_disabled ?? {},
         };
         setConfig(next);
-        if (!alreadySeeded) void api.saveConfig(next); // fige le semis dès le 1er lancement
+        // Fige le semis d'actions et/ou la migration des sources dès le 1er lancement.
+        if (!alreadySeeded || needsMigration) void api.saveConfig(next);
       } else if (c) {
         setPartialConfig(c);
       }
@@ -407,13 +458,29 @@ export default function App() {
   );
 
   // ----- Scan -----
+  // Un scan est coûteux (git par projet) : on interdit les scans concurrents.
+  // scanPendingRef mémorise qu'une modification est arrivée pendant un scan pour
+  // le rejouer une seule fois à la fin (coalescing) ; rescanRef pointe toujours
+  // vers la dernière version de `rescan` (donc l'état le plus récent).
+  const scanBusyRef = useRef(false);
+  const scanPendingRef = useRef(false);
+  const rescanRef = useRef<() => void>(() => {});
   const rescan = useCallback(async () => {
-    if (!root) return;
+    // Un scan tourne déjà : on note qu'il faudra le refaire, sans lancer en //.
+    if (scanBusyRef.current) {
+      scanPendingRef.current = true;
+      return;
+    }
     setScanError(null);
+    if (!sources.length) {
+      setProjects([]);
+      return;
+    }
+    scanBusyRef.current = true;
     setScanning(true);
     try {
       await track("Scan des projets", "", async () => {
-        const list = await api.scanProjects(root, startCmd, cmdOverrides);
+        const list = await api.scanProjects(sources, startCmd, cmdOverrides);
         setProjects(list);
         setGitMap({}); // recharge l'état git
         const ids = await api.runningIds();
@@ -433,17 +500,33 @@ export default function App() {
       setScanError(String(e));
     } finally {
       setScanning(false);
+      scanBusyRef.current = false;
+      // Une modification est survenue pendant le scan : on rejoue une fois, avec
+      // la dernière version de rescan (donc les dernières sources).
+      if (scanPendingRef.current) {
+        scanPendingRef.current = false;
+        rescanRef.current();
+      }
     }
-  }, [root, startCmd, cmdOverrides, refreshGitFor, track]);
+  }, [sources, startCmd, cmdOverrides, refreshGitFor, track]);
+
+  // rescanRef suit toujours la dernière closure de rescan (pour le re-jeu ci-dessus).
+  useEffect(() => {
+    rescanRef.current = rescan;
+  }, [rescan]);
 
   // Ne rescanne que si une valeur pertinente au scan change réellement. On compare
-  // le *contenu* des overrides (et non la référence, reconstruite à chaque save) :
-  // sinon toute sauvegarde de réglage (couleurs, actions…) relançait un scan.
+  // le *contenu* des sources / overrides (et non la référence, reconstruite à chaque
+  // save) : sinon toute sauvegarde de réglage (couleurs, actions…) relançait un scan.
+  // Debounce : plusieurs modifications rapprochées (typage de sous-dossiers, ajouts)
+  // ne déclenchent qu'un seul scan une fois la salve terminée.
   useEffect(() => {
-    if (config) rescan();
+    if (!config) return;
+    const t = setTimeout(() => rescanRef.current(), 350);
+    return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    config?.projects_root,
+    JSON.stringify(config?.sources ?? []),
     config?.git_bash_path,
     config?.start_command,
     JSON.stringify(config?.command_overrides ?? {}),
@@ -507,13 +590,14 @@ export default function App() {
         setPkgLinks({});
         return;
       }
+      const services = servicesForLinks(list);
       const result: Record<string, { linked: number; present: number }> = {};
       await Promise.all(
         pkgs.map(async (p) => {
           try {
             const meta = await api.readPackageJson(p.path);
-            const services = await api.packageLinks(root, meta.name);
-            const present = services.filter((s) => s.present);
+            const links = await api.packageLinks(services, meta.name);
+            const present = links.filter((s) => s.present);
             result[p.id] = {
               present: present.length,
               linked: present.filter((s) => s.linked).length,
@@ -525,7 +609,7 @@ export default function App() {
       );
       setPkgLinks(result);
     },
-    [root],
+    [],
   );
 
   useEffect(() => {
@@ -723,7 +807,7 @@ export default function App() {
       try {
         const meta = await api.readPackageJson(p.path);
         const value = link ? `../../packages/${p.name}` : meta.version;
-        const services = await api.packageLinks(root, meta.name);
+        const services = await api.packageLinks(servicesForLinks(projects), meta.name);
         const present = services.filter((s) => s.present);
         pushLocal(p.id, `$ ${link ? "Lier" : "Restaurer"} ${meta.name} → ${value}`, "sys");
         if (!present.length) {
@@ -748,7 +832,7 @@ export default function App() {
         return 1;
       }
     },
-    [root, pushLocal, postLink],
+    [projects, pushLocal, postLink],
   );
 
   // Exécute une action (bash, démarrage/arrêt, tests, ou opération de package).
@@ -1086,7 +1170,7 @@ export default function App() {
       });
       try {
         const meta = await api.readPackageJson(p.path);
-        const services = await api.packageLinks(root, meta.name);
+        const services = await api.packageLinks(servicesForLinks(projects), meta.name);
         setLinkModal((m) =>
           m && m.pkg.id === p.id
             ? { ...m, depName: meta.name, version: meta.version, services, loading: false }
@@ -1098,7 +1182,7 @@ export default function App() {
         );
       }
     },
-    [root],
+    [projects],
   );
 
   const applyLink = useCallback(
@@ -1110,7 +1194,7 @@ export default function App() {
       try {
         await api.setDepVersion(svc.path, m.depName, value);
         await postLink(svc.id, svc.path, m.depName);
-        const services = await api.packageLinks(root, m.depName);
+        const services = await api.packageLinks(servicesForLinks(projects), m.depName);
         setLinkModal((cur) => (cur && cur.pkg.id === m.pkg.id ? { ...cur, services } : cur));
         setLinkVersion((v) => v + 1);
       } catch (e) {
@@ -1119,7 +1203,7 @@ export default function App() {
         setLinkBusy(null);
       }
     },
-    [root, postLink],
+    [projects, postLink],
   );
 
   // ----- Séquences générales (multi-services) -----
@@ -1882,12 +1966,14 @@ export default function App() {
     [dbTabs, projects, loadTab, pushLocal],
   );
   const onSetupSubmit = useCallback(
-    async (r: string, b: string, cmd: string) => {
+    async (srcs: ProjectSource[], b: string, cmd: string) => {
       // Conserve les séquences / actions d'une éventuelle config incomplète
       // (cas d'une ancienne config sans commande de démarrage).
       await persist({
         ...partialConfig,
-        projects_root: r,
+        projects_root: partialConfig?.projects_root ?? "",
+        sources: srcs,
+        sources_migrated: true,
         git_bash_path: b,
         start_command: cmd,
         command_overrides: partialConfig?.command_overrides ?? {},
@@ -1997,7 +2083,7 @@ export default function App() {
   if (!config)
     return (
       <Setup
-        initialRoot={partialConfig?.projects_root ?? ""}
+        initialSources={partialConfig?.sources ?? []}
         initialBash={partialConfig?.git_bash_path || DEFAULT_GIT_BASH}
         initialCommand={partialConfig?.start_command ?? ""}
         onSubmit={onSetupSubmit}
@@ -2251,7 +2337,9 @@ export default function App() {
             )}
             {projects.length === 0 && !scanning && !scanError && (
               <div className="empty">
-                Aucun projet détecté dans <code>{root}</code>.
+                {sources.length === 0
+                  ? "Aucun projet configuré. Ajoutez-en dans ⚙ Réglages → Projets."
+                  : "Aucun projet trouvé dans les sources configurées. Vérifiez ⚙ Réglages → Projets."}
               </div>
             )}
           </section>
@@ -2476,10 +2564,11 @@ export default function App() {
 // Vue Réglages
 // ---------------------------------------------------------------------------
 
-type SettingsTab = "general" | "startup" | "actions" | "sequences" | "database";
+type SettingsTab = "general" | "projects" | "startup" | "actions" | "sequences" | "database";
 
 const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   { id: "general", label: "Général" },
+  { id: "projects", label: "Projets" },
   { id: "startup", label: "Démarrage" },
   { id: "actions", label: "Actions" },
   { id: "sequences", label: "Séquences" },
@@ -2515,7 +2604,7 @@ function SettingsView({
     ...a,
     color: draft.action_colors[a.id],
   }));
-  const missingRequired = !draft.projects_root.trim() || !draft.git_bash_path.trim() || !draft.start_command.trim();
+  const missingRequired = !draft.git_bash_path.trim() || !draft.start_command.trim();
 
   useEffect(() => {
     autostart.isEnabled().then(setAutoStart).catch(() => {});
@@ -2527,8 +2616,9 @@ function SettingsView({
       saveTimer.current = null;
     }
     const d = draftRef.current;
-    // On ne persiste jamais une config invalide (un champ requis vidé).
-    if (!d.projects_root.trim() || !d.git_bash_path.trim() || !d.start_command.trim()) {
+    // On ne persiste jamais une config invalide (un champ requis vidé). Les
+    // sources peuvent être vides (l'utilisateur peut tout retirer puis ré-ajouter).
+    if (!d.git_bash_path.trim() || !d.start_command.trim()) {
       return;
     }
     pendingRef.current = false;
@@ -2627,31 +2717,25 @@ function SettingsView({
           ))}
         </div>
 
+        {tab === "projects" && (
+          <>
+            <h2>Projets</h2>
+            <p className="muted">
+              Ajoutez un <b>projet</b> (un dossier = un projet), ou un <b>dossier parent</b> dont
+              chaque sous-dossier devient un projet à typer (Service, Front ou Package). Les dossiers
+              parents sont réanalysés à chaque scan : un nouveau sous-dossier apparaît automatiquement.
+            </p>
+            <ProjectSources
+              sources={draft.sources}
+              onChange={(s) => patch({ sources: s })}
+              addButtonsOnTop
+            />
+          </>
+        )}
+
         {tab === "general" && (
           <>
             <h2>Chemins</h2>
-            <label className="field">
-              <span>Dossier racine des projets</span>
-              <div className="field-row">
-                <input
-                  value={draft.projects_root}
-                  onChange={(e) => patch({ projects_root: e.target.value }, true)}
-                  onBlur={() => void flush()}
-                />
-                <button
-                  className="btn"
-                  onClick={async () => {
-                    const p = await pickFolder("Choisir la racine des projets");
-                    if (p) patch({ projects_root: p });
-                  }}
-                >
-                  Parcourir…
-                </button>
-              </div>
-              {!draft.projects_root.trim() && (
-                <small className="field-error">Champ requis pour enregistrer.</small>
-              )}
-            </label>
             <label className="field">
               <span>Chemin de Git Bash</span>
               <div className="field-row">

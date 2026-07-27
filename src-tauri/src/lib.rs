@@ -210,6 +210,11 @@ struct StatusEvent {
 struct Config {
     #[serde(default)]
     projects_root: String,
+    /// Sources des projets (projets uniques et dossiers parents typés). Opaque
+    /// côté Rust (round-trip JSON) : interprétée par l'interface, et repassée
+    /// typée à `scan_projects`.
+    #[serde(default)]
+    sources: Vec<serde_json::Value>,
     #[serde(default)]
     git_bash_path: String,
     /// Commande de démarrage par défaut (ex. "npm run start", "./startup.sh").
@@ -229,6 +234,11 @@ struct Config {
     /// (sinon elles réapparaissent après suppression à chaque redémarrage).
     #[serde(default)]
     actions_seeded: bool,
+    /// Vrai une fois les sources initialisées (migration de l'ancienne racine
+    /// unique effectuée, ou config créée directement avec des sources) : évite de
+    /// re-migrer si l'utilisateur retire ensuite toutes ses sources.
+    #[serde(default)]
+    sources_migrated: bool,
     /// Connexions BDD par service : id de projet → mapping des clés .env
     /// (host/port/user/password/database). Aucun identifiant stocké, juste les
     /// noms de clés .env, pour pouvoir se reconnecter à la réouverture.
@@ -702,6 +712,62 @@ fn detect_port(dir: &Path) -> Option<u16> {
     None
 }
 
+/// Cherche un port dans un fichier de config JS/TS (`port: 5173`, `port = 5173`).
+fn find_config_port(text: &str) -> Option<u16> {
+    for line in text.lines() {
+        let l = line.trim();
+        if l.starts_with("//") || l.starts_with('*') || l.starts_with('#') {
+            continue;
+        }
+        let ll = l.to_lowercase();
+        if let Some(idx) = ll.find("port") {
+            let after = l[idx + 4..].trim_start();
+            if let Some(rest) = after.strip_prefix(':').or_else(|| after.strip_prefix('=')) {
+                if let Some(p) = first_number(rest) {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Port par défaut d'un front sans port explicite, déduit de l'outil de build.
+/// Évite d'imposer 3000 (défaut CRA) à un projet Vite (5173), Angular (4200)…
+fn front_fallback_port(dir: &Path) -> Option<u16> {
+    // Port explicitement configuré dans un vite.config.*
+    for f in [
+        "vite.config.ts",
+        "vite.config.js",
+        "vite.config.mjs",
+        "vite.config.mts",
+        "vite.config.cjs",
+    ] {
+        if let Ok(txt) = std::fs::read_to_string(dir.join(f)) {
+            if let Some(p) = find_config_port(&txt) {
+                return Some(p);
+            }
+        }
+    }
+    // Sinon, défaut connu de l'outil (lu dans package.json).
+    if let Ok(txt) = std::fs::read_to_string(dir.join("package.json")) {
+        let lower = txt.to_lowercase();
+        if lower.contains("\"vite\"") {
+            return Some(5173); // Vite
+        }
+        if lower.contains("react-scripts") {
+            return Some(3000); // Create React App
+        }
+        if lower.contains("\"next\"") {
+            return Some(3000); // Next.js
+        }
+        if lower.contains("@angular/") {
+            return Some(4200); // Angular
+        }
+    }
+    None
+}
+
 #[derive(Serialize)]
 struct PortInfo {
     port: u16,
@@ -842,100 +908,175 @@ fn read_scripts(dir: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn scan_dir(
-    root: &str,
-    sub: &str,
+/// Une source de projets telle que déclarée dans la config (désérialisée depuis
+/// l'interface). Voir `ProjectSource` côté TypeScript. Les clés sont en camelCase.
+#[derive(Deserialize)]
+struct ProjectSource {
+    #[serde(default)]
+    path: String,
+    /// "single" (le dossier est un projet) ou "parent" (ses sous-dossiers le sont).
+    #[serde(default)]
+    mode: String,
+    /// (single) Type du projet.
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+    /// (parent) Type appliqué aux sous-dossiers sans exception.
+    #[serde(default, rename = "defaultType")]
+    default_type: Option<String>,
+    /// (parent) Type précis, ou "ignored", par nom de sous-dossier.
+    #[serde(default)]
+    overrides: HashMap<String, String>,
+}
+
+/// Construit un `Project` à partir d'un dossier et de son type, et l'ajoute à
+/// `out`. Généralise l'ancien `scan_dir` (un seul projet, tout type).
+fn push_project(
+    path: &Path,
     kind: &str,
     start_cmd: &str,
     overrides: &HashMap<String, String>,
     out: &mut Vec<Project>,
 ) {
-    let base = Path::new(root).join(sub);
-    if let Ok(entries) = std::fs::read_dir(&base) {
-        let mut dirs: Vec<_> = entries.flatten().map(|e| e.path()).collect();
-        dirs.sort();
-        for p in dirs {
-            if !p.is_dir() {
-                continue;
-            }
-            let name = p
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            if name.starts_with('.') || name == "node_modules" {
-                continue;
-            }
-            let has_startup = p.join("startup.sh").is_file();
-            let has_pkg = p.join("package.json").is_file();
-            let has_env = p.join(".env").is_file();
-            let id = format!("{}:{}", kind, name);
-            // Commande de démarrage : l'exception du projet si elle existe,
-            // sinon la commande par défaut définie par l'utilisateur (config).
-            let cmd = overrides.get(&id).map(String::as_str).unwrap_or(start_cmd);
-            let start_command = if kind == "service" && (has_pkg || has_startup) && !cmd.is_empty() {
-                Some(cmd.to_string())
-            } else {
-                None // les packages sont des librairies : pas de démarrage
-            };
-            let port = if kind == "service" { detect_port(&p) } else { None };
-            let scripts = if has_pkg { read_scripts(&p) } else { Vec::new() };
-            out.push(Project {
-                id,
-                name,
-                kind: kind.to_string(),
-                path: p.to_string_lossy().to_string(),
-                start_command,
-                has_startup,
-                has_package_json: has_pkg,
-                has_env,
-                port,
-                scripts,
-            });
+    if !path.is_dir() {
+        return; // dossier absent (source obsolète) : ignoré silencieusement
+    }
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let has_startup = path.join("startup.sh").is_file();
+    let has_pkg = path.join("package.json").is_file();
+    let has_env = path.join(".env").is_file();
+    let id = format!("{}:{}", kind, name);
+    // Commande de démarrage : l'exception du projet si elle existe, sinon la
+    // commande par défaut définie par l'utilisateur (config).
+    let cmd = overrides.get(&id).map(String::as_str).unwrap_or(start_cmd);
+    // Services et fronts sont démarrables (s'il y a de quoi démarrer) ; les
+    // packages sont des librairies : pas de démarrage.
+    let startable = kind == "service" || kind == "front";
+    let start_command = if startable && (has_pkg || has_startup) && !cmd.is_empty() {
+        Some(cmd.to_string())
+    } else {
+        None
+    };
+    // Port : détecté pour les projets démarrables. Le front, s'il n'expose pas
+    // son port dans ses fichiers, retombe sur le défaut de son outil de build
+    // (Vite 5173, CRA/Next 3000, Angular 4200) plutôt que 3000 systématique.
+    let port = match kind {
+        "front" => detect_port(path).or_else(|| front_fallback_port(path)),
+        "service" => detect_port(path),
+        _ => None,
+    };
+    let scripts = if has_pkg { read_scripts(path) } else { Vec::new() };
+    out.push(Project {
+        id,
+        name,
+        kind: kind.to_string(),
+        path: path.to_string_lossy().to_string(),
+        start_command,
+        has_startup,
+        has_package_json: has_pkg,
+        has_env,
+        port,
+        scripts,
+    });
+}
+
+/// Désambiguïse les ids en collision (même type + même nom sur deux sources) :
+/// le premier garde l'id nu (préserve la rétrocompat des configs), les suivants
+/// reçoivent un suffixe déterministe.
+fn dedupe_ids(projects: &mut [Project]) {
+    let mut seen: HashMap<String, u32> = HashMap::new();
+    for p in projects.iter_mut() {
+        let n = seen.entry(p.id.clone()).or_insert(0);
+        *n += 1;
+        if *n > 1 {
+            p.id = format!("{}#{}", p.id, *n);
         }
     }
 }
 
 #[tauri::command]
 async fn scan_projects(
-    root: String,
+    sources: Vec<ProjectSource>,
     start_command: String,
     command_overrides: HashMap<String, String>,
 ) -> Result<Vec<Project>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        if root.is_empty() || !Path::new(&root).is_dir() {
-            return Err(format!("Dossier racine introuvable : {}", root));
+        let mut projects: Vec<Project> = Vec::new();
+        for src in &sources {
+            match src.mode.as_str() {
+                // Le dossier est lui-même un projet.
+                "single" => {
+                    let kind = src.kind.as_deref().unwrap_or("service");
+                    push_project(
+                        Path::new(&src.path),
+                        kind,
+                        &start_command,
+                        &command_overrides,
+                        &mut projects,
+                    );
+                }
+                // Chaque sous-dossier direct devient un projet (rescan dynamique).
+                "parent" => {
+                    let default_type = src.default_type.as_deref().unwrap_or("service");
+                    if let Ok(entries) = std::fs::read_dir(&src.path) {
+                        let mut dirs: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+                        dirs.sort();
+                        for p in dirs {
+                            if !p.is_dir() {
+                                continue;
+                            }
+                            let name = p
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_default();
+                            if name.starts_with('.') || name == "node_modules" {
+                                continue;
+                            }
+                            // Type : exception par sous-dossier, sinon type par
+                            // défaut. "ignored" = sous-dossier exclu.
+                            let kind = match src.overrides.get(&name).map(String::as_str) {
+                                Some("ignored") => continue,
+                                Some(k) => k,
+                                None => default_type,
+                            };
+                            push_project(
+                                &p,
+                                kind,
+                                &start_command,
+                                &command_overrides,
+                                &mut projects,
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
-        let mut projects = Vec::new();
-        scan_dir(&root, "services", "service", &start_command, &command_overrides, &mut projects);
-
-        // Front principal : portail-occupant. Comme les services, il démarre
-        // avec la commande par défaut, sauf exception définie pour lui.
-        let front = Path::new(&root).join("portail-occupant");
-        if front.is_dir() {
-            let has_pkg = front.join("package.json").is_file();
-            let has_env = front.join(".env").is_file();
-            let id = "front:portail-occupant".to_string();
-            let cmd = command_overrides
-                .get(&id)
-                .map(String::as_str)
-                .unwrap_or(start_command.as_str());
-            projects.push(Project {
-                id,
-                name: "portail-occupant".to_string(),
-                kind: "front".to_string(),
-                path: front.to_string_lossy().to_string(),
-                start_command: if cmd.is_empty() { None } else { Some(cmd.to_string()) },
-                has_startup: false,
-                has_package_json: has_pkg,
-                has_env,
-                // Le front (CRA) tourne sur 3000 par défaut si rien n'est détecté.
-                port: detect_port(&front).or(Some(3000)),
-                scripts: if has_pkg { read_scripts(&front) } else { Vec::new() },
-            });
-        }
-
-        scan_dir(&root, "packages", "package", &start_command, &command_overrides, &mut projects);
+        dedupe_ids(&mut projects);
         Ok(projects)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Liste les noms des sous-dossiers directs d'un dossier (hors cachés et
+/// node_modules), triés. Sert à typer les sous-dossiers d'une source « dossier
+/// parent » dans l'interface.
+#[tauri::command]
+async fn list_subdirs(path: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let entries =
+            std::fs::read_dir(&path).map_err(|e| format!("Dossier illisible : {}", e))?;
+        let mut names: Vec<String> = entries
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| !n.starts_with('.') && n != "node_modules")
+            .collect();
+        names.sort();
+        Ok(names)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1389,42 +1530,39 @@ fn dep_lookup(pkg: &Path, dep: &str) -> (bool, Option<String>, Option<String>) {
     (false, None, None)
 }
 
-/// Pour un package donné, indique son état dans chaque service.
+/// Référence d'un service transmise par l'interface (elle possède déjà la liste
+/// des projets scannés) : évite de re-scanner un dossier `services/` en dur.
+#[derive(Deserialize)]
+struct ServiceRef {
+    id: String,
+    name: String,
+    path: String,
+}
+
+/// Pour un package donné, indique son état dans chaque service fourni.
 #[tauri::command]
-async fn package_links(root: String, dep_name: String) -> Result<Vec<ServiceDep>, String> {
+async fn package_links(
+    services: Vec<ServiceRef>,
+    dep_name: String,
+) -> Result<Vec<ServiceDep>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let base = Path::new(&root).join("services");
         let mut out = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&base) {
-            let mut dirs: Vec<_> = entries.flatten().map(|e| e.path()).collect();
-            dirs.sort();
-            for p in dirs {
-                if !p.is_dir() {
-                    continue;
-                }
-                let name = p
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                if name.starts_with('.') {
-                    continue;
-                }
-                let pkg = p.join("package.json");
-                if !pkg.is_file() {
-                    continue;
-                }
-                let (present, value, location) = dep_lookup(&pkg, &dep_name);
-                let linked = value.as_deref().map(is_linked_value).unwrap_or(false);
-                out.push(ServiceDep {
-                    id: format!("service:{}", name),
-                    name,
-                    path: p.to_string_lossy().to_string(),
-                    present,
-                    value,
-                    location,
-                    linked,
-                });
+        for svc in services {
+            let pkg = Path::new(&svc.path).join("package.json");
+            if !pkg.is_file() {
+                continue;
             }
+            let (present, value, location) = dep_lookup(&pkg, &dep_name);
+            let linked = value.as_deref().map(is_linked_value).unwrap_or(false);
+            out.push(ServiceDep {
+                id: svc.id,
+                name: svc.name,
+                path: svc.path,
+                present,
+                value,
+                location,
+                linked,
+            });
         }
         Ok(out)
     })
@@ -4705,6 +4843,7 @@ pub fn run() {
             load_config,
             save_config,
             scan_projects,
+            list_subdirs,
             git_info,
             list_branches,
             start_service,
