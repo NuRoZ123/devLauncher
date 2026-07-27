@@ -229,6 +229,51 @@ export interface DbTableSchema {
   constraints: DbSchemaConstraint[];
 }
 
+/** Une relation entre deux tables : une clé étrangère, colonnes comprises. */
+export interface DbRelation {
+  constraint: string;
+  from_table: string;
+  from_columns: string[];
+  to_table: string;
+  to_columns: string[];
+}
+
+/** Une colonne telle qu'affichée dans une boîte du schéma. */
+export interface DbGraphColumn {
+  name: string;
+  /** Type de base : pilote l'icône affichée devant le nom. */
+  base_type: string;
+  /** Type complet, pour l'infobulle. */
+  full_type: string;
+  nullable: boolean;
+  primary_key: boolean;
+  /** true = colonne porteuse d'une clé étrangère. */
+  foreign_key: boolean;
+}
+
+export interface DbGraphTable {
+  name: string;
+  columns: DbGraphColumn[];
+}
+
+/** Le schéma complet de la base : tables avec leurs colonnes, et relations. */
+export interface DbGraphData {
+  tables: DbGraphTable[];
+  relations: DbRelation[];
+}
+
+/**
+ * Disposition sauvegardée du schéma des relations : positions des tables (par
+ * nom) et points de courbure des jointures (par nom de contrainte). Persistée
+ * dans la config, par id de projet.
+ */
+export interface DbGraphLayout {
+  /** Position du coin haut-gauche de chaque table, en unités de graphe. */
+  positions: Record<string, [number, number]>;
+  /** Points de passage intermédiaires d'une jointure (polyligne). */
+  waypoints: Record<string, [number, number][]>;
+}
+
 /** Type de contrainte gérable depuis l'onglet « Structure ». */
 export type DbConstraintKind = "PRIMARY KEY" | "UNIQUE" | "FOREIGN KEY" | "CHECK";
 
@@ -303,6 +348,8 @@ export interface Config {
   db_row_limit: number;
   /** Services déclarés sans base de données : bouton BDD masqué. */
   db_disabled: Record<string, boolean>;
+  /** Disposition sauvegardée du schéma des relations, par id de projet. */
+  db_layouts?: Record<string, DbGraphLayout>;
 }
 
 export interface PkgMeta {

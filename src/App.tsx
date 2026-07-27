@@ -8,6 +8,7 @@ import { DbConnectionModal, type DbModalState } from "./components/DbConnectionM
 import { DbWorkspaceView, type DbWsState } from "./components/DbWorkspaceView";
 import { DbTableDataView, type DbDataState } from "./components/DbTableDataView";
 import { DbTableSchemaView, type DbSchemaState } from "./components/DbTableSchemaView";
+import { DbRelationsView, type DbGraphState } from "./components/DbRelationsView";
 import { EnvModal, type EnvModalState } from "./components/EnvModal";
 import { PackageLinkModal, type LinkModalState } from "./components/PackageLinkModal";
 import { ProjectRow } from "./components/ProjectRow";
@@ -32,6 +33,7 @@ import type {
   ActionDef,
   Config,
   DbConnection,
+  DbGraphLayout,
   DbRowUpdate,
   DbSchemaChange,
   GitInfo,
@@ -49,8 +51,8 @@ import type {
 type StepToken = { cancelled: boolean; runId: string };
 type StepPlan = { action: ActionDef; branch?: string };
 
-/** Sous-onglet d'une table : ses lignes, ou sa structure. */
-type DbTabView = "data" | "schema";
+/** Sous-onglet d'une table : ses lignes, sa structure, ou ses relations. */
+type DbTabView = "data" | "schema" | "relations";
 
 /** Un onglet de table : ses données + son historique de navigation (FK). */
 type DbTab = {
@@ -219,6 +221,16 @@ export default function App() {
   dbWsRef.current = dbWs;
   /** Colonnes déjà lues, par « projet:table » (listes déroulantes de structure). */
   const colCacheRef = useRef<Map<string, string[]>>(new Map());
+  /** Graphe des clés étrangères : chargé une fois, partagé par les deux vues
+   *  (relations d'une table et schéma général). */
+  const [dbGraph, setDbGraph] = useState<DbGraphState>({
+    tables: [],
+    relations: [],
+    loading: false,
+    loaded: false,
+  });
+  /** true = l'onglet « Schéma de la base » est affiché à la place des tables. */
+  const [dbGraphOpen, setDbGraphOpen] = useState(false);
   const [dbTabs, setDbTabs] = useState<DbTab[]>([]);
   // Miroir de `dbTabs` : lit l'état courant hors du cycle de rendu (chargement
   // de la structure déclenché juste après un setDbTabs).
@@ -270,7 +282,10 @@ export default function App() {
         // Les actions par défaut ne sont semées qu'une seule fois : après quoi
         // le drapeau est persisté, et les suppressions de l'utilisateur tiennent.
         const alreadySeeded = c.actions_seeded ?? false;
+        // Spread d'abord : préserve tout champ non listé ici (ex. db_layouts),
+        // qui serait sinon perdu au démarrage puis effacé à la 1re écriture.
         const next: Config = {
+          ...c,
           projects_root: c.projects_root,
           git_bash_path: c.git_bash_path || DEFAULT_GIT_BASH,
           start_command: c.start_command,
@@ -1295,8 +1310,19 @@ export default function App() {
       setDbActiveTab(null);
       setDbDirty({});
       colCacheRef.current.clear();
+      setDbGraph({ tables: [], relations: [], loading: false, loaded: false });
+      setDbGraphOpen(false);
+      graphAskedRef.current = false;
       const content = await api.readEnv(p.path).catch(() => "");
       const v = resolveDbValues(conn, parseEnv(content));
+      // Diagnostic : trace la cible réellement résolue (clé base → valeur), pour
+      // lever toute ambiguïté quand plusieurs services partagent un serveur.
+      pushLocal(
+        p.id,
+        `🗄 Connexion ${p.name} → ${v.host}:${v.port}/${v.database || "(vide)"} ` +
+          `[base via ${conn.databaseKey || "?"}]`,
+        "sys",
+      );
       const patch = (fn: (s: DbWsState) => DbWsState) =>
         setDbWs((s) => (s && s.projectId === p.id ? fn(s) : s));
       if (!v.portValid) {
@@ -1320,7 +1346,7 @@ export default function App() {
         await saveDbConn(p.id, conn, false);
       }
     },
-    [saveDbConn],
+    [saveDbConn, pushLocal],
   );
 
   /** Recharge la liste des tables sans toucher aux onglets ouverts. */
@@ -1435,6 +1461,8 @@ export default function App() {
     (table: string) => {
       const ws = dbWs;
       if (!ws) return;
+      // Ouvrir une table quitte le schéma général (clic sur une boîte).
+      setDbGraphOpen(false);
       const existing = dbTabs.find((t) => t.data.table === table);
       if (existing) {
         setDbActiveTab(existing.id);
@@ -1516,6 +1544,62 @@ export default function App() {
     [projects],
   );
 
+  /** Charge le graphe des clés étrangères de la base (une seule lecture, quel
+   *  que soit le nombre de vues qui l'affichent). */
+  const loadDbGraph = useCallback(async () => {
+    const ws = dbWsRef.current;
+    if (!ws) return;
+    const conn = configRef.current?.db_connections?.[ws.projectId];
+    const p = projects.find((x) => x.id === ws.projectId);
+    if (!conn || !p) return;
+    setDbGraph((g) => ({ ...g, loading: true, error: undefined }));
+    const content = await api.readEnv(p.path).catch(() => "");
+    const v = resolveDbValues(conn, parseEnv(content));
+    if (!v.portValid) {
+      setDbGraph((g) => ({
+        ...g,
+        loading: false,
+        error: `Port invalide : « ${v.portRaw} »`,
+      }));
+      return;
+    }
+    try {
+      const data = await api.dbGraph(
+        conn.driver,
+        v.host,
+        v.port,
+        v.user,
+        v.password,
+        v.database,
+      );
+      setDbGraph({ ...data, loading: false, loaded: true });
+    } catch (e) {
+      setDbGraph((g) => ({ ...g, loading: false, error: String(e) }));
+    }
+  }, [projects]);
+
+  /** Enregistre la disposition du schéma d'un projet (positions + courbures). */
+  const saveGraphLayout = useCallback(
+    (projectId: string, layout: DbGraphLayout) => {
+      const cfg = configRef.current;
+      if (!cfg) return;
+      void persist({
+        ...cfg,
+        db_layouts: { ...(cfg.db_layouts ?? {}), [projectId]: layout },
+      });
+    },
+    [persist],
+  );
+
+  /** Charge le graphe à la première demande seulement (le ref évite un second
+   *  chargement lorsque plusieurs vues s'affichent dans le même rendu). */
+  const graphAskedRef = useRef(false);
+  const ensureDbGraph = useCallback(() => {
+    if (graphAskedRef.current) return;
+    graphAskedRef.current = true;
+    void loadDbGraph();
+  }, [loadDbGraph]);
+
   /** Colonnes d'une table, pour les listes déroulantes de l'onglet Structure.
    *  Mémorisées par « projet:table » et vidées au changement d'espace de travail. */
   const loadTableColumns = useCallback(
@@ -1581,6 +1665,8 @@ export default function App() {
         for (const s of res.statements) pushLocal(projectId, `   ${s}`, "sys");
         // Les colonnes ont changé : le cache des listes déroulantes est périmé.
         colCacheRef.current.clear();
+        // Une contrainte a pu créer ou supprimer une clé étrangère.
+        if (graphAskedRef.current) void loadDbGraph();
         // Les colonnes ont changé : structure *et* données doivent être relues.
         await loadTabSchema(tabId);
         void loadTab(tabId, projectId, table, limit, filter);
@@ -1589,13 +1675,17 @@ export default function App() {
         return { ok: false, message: String(e) };
       }
     },
-    [projects, loadTabSchema, loadTab, pushLocal],
+    [projects, loadTabSchema, loadTab, pushLocal, loadDbGraph],
   );
 
   /** Bascule entre les sous-onglets d'une table ; charge la structure au besoin. */
   const setTabView = useCallback(
     (tabId: string, view: DbTabView) => {
       setDbTabs((ts) => ts.map((t) => (t.id === tabId ? { ...t, view } : t)));
+      if (view === "relations") {
+        ensureDbGraph();
+        return;
+      }
       if (view !== "schema") return;
       const tab = dbTabsRef.current.find((t) => t.id === tabId);
       // Structure absente ou obsolète (la table a changé en suivant une FK).
@@ -1603,7 +1693,7 @@ export default function App() {
         void loadTabSchema(tabId);
       }
     },
-    [loadTabSchema],
+    [loadTabSchema, ensureDbGraph],
   );
 
   const closeDbTab = useCallback(
@@ -1796,6 +1886,7 @@ export default function App() {
       // Conserve les séquences / actions d'une éventuelle config incomplète
       // (cas d'une ancienne config sans commande de démarrage).
       await persist({
+        ...partialConfig,
         projects_root: r,
         git_bash_path: b,
         start_command: cmd,
@@ -2227,9 +2318,17 @@ export default function App() {
             label: t.data.table,
             dirty: dbDirty[t.id] ?? 0,
           }))}
-          activeId={dbActiveTab}
+          activeId={dbGraphOpen ? null : dbActiveTab}
+          graphOpen={dbGraphOpen}
+          onOpenGraph={() => {
+            setDbGraphOpen(true);
+            ensureDbGraph();
+          }}
           onOpenTable={openTableTab}
-          onSelectTab={setDbActiveTab}
+          onSelectTab={(id) => {
+            setDbGraphOpen(false);
+            setDbActiveTab(id);
+          }}
           onCloseTab={closeDbTab}
           onRefreshTables={refreshWsTables}
           onClose={() => setDbWs(null)}
@@ -2240,7 +2339,7 @@ export default function App() {
             <div
               key={t.id}
               className="dbws-tabpanel"
-              style={{ display: t.id === dbActiveTab ? "flex" : "none" }}
+              style={{ display: t.id === dbActiveTab && !dbGraphOpen ? "flex" : "none" }}
             >
               <div className="dbsub-tabs">
                 <button
@@ -2257,6 +2356,13 @@ export default function App() {
                 >
                   🧬 Structure
                 </button>
+                <button
+                  className={"dbsub-tab" + (t.view === "relations" ? " on" : "")}
+                  onClick={() => setTabView(t.id, "relations")}
+                  title="Schéma des tables liées par clé étrangère"
+                >
+                  🔗 Relations
+                </button>
               </div>
               {/* Les deux vues restent montées : les modifications en attente du
                   tableau survivent au passage par la structure. */}
@@ -2266,7 +2372,7 @@ export default function App() {
               >
                 <DbTableDataView
                   state={t.data}
-                  active={t.id === dbActiveTab && t.view === "data"}
+                  active={!dbGraphOpen && t.id === dbActiveTab && t.view === "data"}
                   onLimitChange={(n) => changeTabLimit(t.id, n)}
                   onFilterChange={(f) => changeTabFilter(t.id, f)}
                   onRefresh={() => refreshTab(t.id)}
@@ -2289,7 +2395,7 @@ export default function App() {
                 <DbTableSchemaView
                   table={t.data.table}
                   state={t.schema}
-                  active={t.id === dbActiveTab && t.view === "schema"}
+                  active={!dbGraphOpen && t.id === dbActiveTab && t.view === "schema"}
                   driver={dbWs.driver}
                   tables={dbWs.tables}
                   onLoadColumns={loadTableColumns}
@@ -2298,8 +2404,33 @@ export default function App() {
                   onApply={(changes) => applyTabSchema(t.id, changes)}
                 />
               </div>
+              <div
+                className="dbsub-panel"
+                style={{ display: t.view === "relations" ? "flex" : "none" }}
+              >
+                <DbRelationsView
+                  state={dbGraph}
+                  focus={t.data.table}
+                  onRefresh={loadDbGraph}
+                  onOpenTable={openTableTab}
+                />
+              </div>
             </div>
           ))}
+          {/* Schéma général : monté avec les onglets, visible seul quand actif. */}
+          <div
+            className="dbws-tabpanel"
+            style={{ display: dbGraphOpen ? "flex" : "none" }}
+          >
+            <DbRelationsView
+              state={dbGraph}
+              active={dbGraphOpen}
+              savedLayout={config?.db_layouts?.[dbWs.projectId] ?? null}
+              onSaveLayout={(layout) => saveGraphLayout(dbWs.projectId, layout)}
+              onRefresh={loadDbGraph}
+              onOpenTable={openTableTab}
+            />
+          </div>
         </DbWorkspaceView>
       )}
 
@@ -2403,6 +2534,7 @@ function SettingsView({
     pendingRef.current = false;
     setPending(false);
     await onPersist({
+      ...d,
       projects_root: d.projects_root.trim(),
       git_bash_path: d.git_bash_path.trim(),
       start_command: d.start_command.trim(),

@@ -2498,6 +2498,185 @@ button.db-table {
   text-decoration: none;
 }
 
+/* ---------------- Schéma des relations ---------------- */
+.dbgraph {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.dbgraph-hint {
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+.dbgraph-autosave {
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  transition: color 0.2s;
+}
+.dbgraph-autosave.on {
+  color: var(--green);
+}
+.dbgraph-confirm {
+  width: 420px;
+}
+.dbgraph-confirm-text {
+  margin: 10px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+/* Bascule « Colonnes » : état actif. */
+.dbgraph .btn.on {
+  border-color: var(--accent);
+  color: var(--text);
+  background: rgba(79, 140, 255, 0.12);
+}
+.dbgraph-canvas {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--bg-2);
+  cursor: grab;
+  user-select: none;
+}
+.dbgraph-canvas:active {
+  cursor: grabbing;
+}
+.dbgraph-edge {
+  stroke: var(--border);
+  stroke-width: 2.1;
+  fill: none;
+  pointer-events: none;
+}
+.dbgraph-edge.on {
+  stroke: var(--accent);
+  stroke-width: 3;
+}
+.dbgraph-edge.sel {
+  stroke: var(--accent);
+  stroke-width: 3.4;
+}
+/* Bande de clic large et invisible le long de la jointure (clic = sélection). */
+.dbgraph-edge-hit {
+  stroke: transparent;
+  stroke-width: 14;
+  fill: none;
+  cursor: pointer;
+}
+/* Colonnes liées par la jointure sélectionnée */
+.dbgraph-col-hl {
+  fill: rgba(79, 140, 255, 0.22);
+  stroke: var(--accent);
+  stroke-width: 1;
+}
+.dbgraph-col.hl {
+  fill: var(--text);
+  font-weight: 700;
+}
+.dbgraph-node.linked .dbgraph-box {
+  stroke: var(--accent);
+  stroke-width: 1.8;
+}
+/* Point de courbure d'une jointure */
+.dbgraph-wp {
+  fill: var(--accent);
+  stroke: var(--bg);
+  stroke-width: 1.5;
+  cursor: grab;
+}
+.dbgraph-wp:hover {
+  fill: var(--accent-2);
+  r: 5.5;
+}
+.dbgraph-canvas.editable .dbgraph-node {
+  cursor: grab;
+}
+.dbgraph-canvas.editable .dbgraph-node:active {
+  cursor: grabbing;
+}
+.dbgraph-node {
+  cursor: pointer;
+}
+.dbgraph-node text {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  pointer-events: none;
+}
+.dbgraph-box {
+  fill: var(--panel);
+  stroke: var(--border);
+  stroke-width: 1.2;
+}
+.dbgraph-head {
+  fill: var(--panel-2);
+  stroke: none;
+}
+.dbgraph-title {
+  fill: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  text-anchor: middle;
+}
+.dbgraph-col {
+  fill: var(--text-dim);
+  font-size: 11px;
+}
+.dbgraph-col.pk {
+  fill: var(--text);
+  font-weight: 700;
+}
+.dbgraph-col.fk {
+  fill: var(--accent-2);
+}
+.dbgraph-ico {
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.dbgraph-ico.t-num {
+  fill: var(--accent-2);
+}
+.dbgraph-ico.t-text {
+  fill: var(--green);
+}
+.dbgraph-ico.t-bool {
+  fill: var(--yellow);
+}
+.dbgraph-ico.t-date,
+.dbgraph-ico.t-json,
+.dbgraph-ico.t-uuid,
+.dbgraph-ico.t-bin {
+  fill: var(--muted);
+}
+.dbgraph-more {
+  fill: var(--muted);
+  font-size: 10px;
+  font-style: italic;
+}
+/* Survol / table au centre */
+.dbgraph-node.on .dbgraph-box {
+  stroke: var(--accent);
+  stroke-width: 1.8;
+}
+.dbgraph-node.on .dbgraph-head {
+  fill: rgba(79, 140, 255, 0.18);
+}
+.dbgraph-node.focus .dbgraph-box {
+  stroke: var(--yellow);
+  stroke-width: 2;
+}
+.dbgraph-node.focus .dbgraph-head {
+  fill: rgba(210, 153, 34, 0.22);
+}
+/* Onglet épinglé du schéma général */
+.dbws-tab-pin {
+  border-right: 1px solid var(--border);
+  margin-right: 4px;
+}
+
 /* ---------------- Spinners / loaders ---------------- */
 .spinner {
   display: inline-block;

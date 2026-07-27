@@ -11,6 +11,7 @@ import type {
   Config,
   DbAlterResult,
   DbDriver,
+  DbGraphData,
   DbRowUpdate,
   DbSchemaChange,
   DbTableData,
@@ -136,6 +137,16 @@ export const api = {
       database,
       table,
     }),
+
+  /** Lit le schéma de la base : colonnes de chaque table et clés étrangères. */
+  dbGraph: (
+    driver: DbDriver,
+    host: string,
+    port: number,
+    user: string,
+    password: string,
+    database: string,
+  ) => invoke<DbGraphData>("db_graph", { driver, host, port, user, password, database }),
 
   /** Liste les noms de colonnes d'une table (listes déroulantes de structure). */
   dbTableColumns: (

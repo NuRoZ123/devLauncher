@@ -240,6 +240,11 @@ struct Config {
     /// Services déclarés sans base de données : leur bouton BDD est masqué.
     #[serde(default)]
     db_disabled: HashMap<String, bool>,
+    /// Disposition sauvegardée du schéma des relations, par id de projet :
+    /// positions des tables et points de courbure des jointures. Opaque côté
+    /// Rust (round-trip JSON), interprétée par l'interface.
+    #[serde(default)]
+    db_layouts: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -3041,6 +3046,282 @@ fn my_table_schema(
     })
 }
 
+/// Une relation entre deux tables : une clé étrangère, colonnes comprises.
+#[derive(Serialize)]
+struct DbRelation {
+    constraint: String,
+    from_table: String,
+    from_columns: Vec<String>,
+    to_table: String,
+    to_columns: Vec<String>,
+}
+
+/// Une colonne telle qu'affichée dans une boîte du schéma.
+#[derive(Serialize)]
+struct GraphColumn {
+    name: String,
+    /// Type de base : pilote l'icône affichée devant le nom.
+    base_type: String,
+    /// Type complet, pour l'infobulle.
+    full_type: String,
+    nullable: bool,
+    primary_key: bool,
+    /// true = colonne porteuse d'une clé étrangère.
+    foreign_key: bool,
+}
+
+#[derive(Serialize)]
+struct GraphTable {
+    name: String,
+    columns: Vec<GraphColumn>,
+}
+
+/// Le schéma complet de la base : tables avec leurs colonnes, et relations.
+#[derive(Serialize)]
+struct DbGraphData {
+    tables: Vec<GraphTable>,
+    relations: Vec<DbRelation>,
+}
+
+/// Lit le schéma de la base (colonnes de chaque table + clés étrangères).
+/// Alimente le schéma général et la vue des relations d'une table.
+#[tauri::command]
+async fn db_graph(
+    driver: String,
+    host: String,
+    port: u16,
+    user: String,
+    password: String,
+    database: String,
+) -> Result<DbGraphData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (mut tables, relations) = match driver.as_str() {
+            "postgres" => (
+                pg_graph_tables(&host, port, &user, &password, &database)?,
+                pg_relations(&host, port, &user, &password, &database)?,
+            ),
+            "mariadb" | "mysql" => (
+                my_graph_tables(&host, port, &user, &password, &database)?,
+                my_relations(&host, port, &user, &password, &database)?,
+            ),
+            other => return Err(format!("Pilote inconnu : {other}")),
+        };
+        // Marque les colonnes porteuses d'une clé étrangère à partir des
+        // relations : évite une requête de plus par table.
+        let fk: HashSet<(String, String)> = relations
+            .iter()
+            .flat_map(|r| {
+                r.from_columns
+                    .iter()
+                    .map(|c| (r.from_table.clone(), c.to_lowercase()))
+            })
+            .collect();
+        for t in &mut tables {
+            for c in &mut t.columns {
+                c.foreign_key = fk.contains(&(t.name.clone(), c.name.to_lowercase()));
+            }
+        }
+        Ok(DbGraphData { tables, relations })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn pg_graph_tables(
+    host: &str,
+    port: u16,
+    user: &str,
+    password: &str,
+    database: &str,
+) -> Result<Vec<GraphTable>, String> {
+    let mut client = pg_client(host, port, user, password, database)?;
+    let rows = client
+        .query(
+            "SELECT ns.nspname::text, cl.relname::text, a.attname::text, \
+             format_type(a.atttypid, a.atttypmod), t.typname::text, a.attnotnull, \
+             EXISTS (SELECT 1 FROM pg_constraint pc \
+                     WHERE pc.conrelid = cl.oid AND pc.contype = 'p' \
+                     AND a.attnum = ANY(pc.conkey)) \
+             FROM pg_attribute a \
+             JOIN pg_class cl ON cl.oid = a.attrelid \
+             JOIN pg_namespace ns ON ns.oid = cl.relnamespace \
+             JOIN pg_type t ON t.oid = a.atttypid \
+             WHERE cl.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped \
+             AND ns.nspname NOT IN ('pg_catalog', 'information_schema') \
+             ORDER BY ns.nspname, cl.relname, a.attnum",
+            &[],
+        )
+        .map_err(|e| format!("Lecture des colonnes échouée : {}", pg_err_msg(&e)))?;
+    let mut out: Vec<GraphTable> = Vec::new();
+    for r in &rows {
+        let schema: String = r.get(0);
+        let relname: String = r.get(1);
+        // Même convention de nommage que `pg_tables`.
+        let table = if schema == "public" {
+            relname
+        } else {
+            format!("{schema}.{relname}")
+        };
+        let notnull: bool = r.get(5);
+        let col = GraphColumn {
+            name: r.get(2),
+            full_type: r.get(3),
+            base_type: r.get(4),
+            nullable: !notnull,
+            primary_key: r.get(6),
+            foreign_key: false,
+        };
+        match out.last_mut() {
+            Some(last) if last.name == table => last.columns.push(col),
+            _ => out.push(GraphTable {
+                name: table,
+                columns: vec![col],
+            }),
+        }
+    }
+    Ok(out)
+}
+
+fn my_graph_tables(
+    host: &str,
+    port: u16,
+    user: &str,
+    password: &str,
+    database: &str,
+) -> Result<Vec<GraphTable>, String> {
+    use mysql::prelude::Queryable;
+    let mut conn = my_conn(host, port, user, password, database)?;
+    let cell = |row: &mysql::Row, i: usize| my_value_to_string(row.as_ref(i));
+    let rows: Vec<mysql::Row> = conn
+        .query(
+            "SELECT c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE, c.COLUMN_TYPE, \
+             c.IS_NULLABLE, c.COLUMN_KEY \
+             FROM information_schema.COLUMNS c \
+             JOIN information_schema.TABLES t \
+               ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME \
+              AND t.TABLE_TYPE = 'BASE TABLE' \
+             WHERE c.TABLE_SCHEMA = DATABASE() \
+             ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION",
+        )
+        .map_err(|e| format!("Lecture des colonnes échouée : {e}"))?;
+    let mut out: Vec<GraphTable> = Vec::new();
+    for r in &rows {
+        let table = cell(r, 0).unwrap_or_default();
+        let col = GraphColumn {
+            name: cell(r, 1).unwrap_or_default(),
+            base_type: cell(r, 2).unwrap_or_default(),
+            full_type: cell(r, 3).unwrap_or_default(),
+            nullable: cell(r, 4).is_some_and(|s| s.eq_ignore_ascii_case("YES")),
+            primary_key: cell(r, 5).is_some_and(|s| s == "PRI"),
+            foreign_key: false,
+        };
+        match out.last_mut() {
+            Some(last) if last.name == table => last.columns.push(col),
+            _ => out.push(GraphTable {
+                name: table,
+                columns: vec![col],
+            }),
+        }
+    }
+    Ok(out)
+}
+
+fn pg_relations(
+    host: &str,
+    port: u16,
+    user: &str,
+    password: &str,
+    database: &str,
+) -> Result<Vec<DbRelation>, String> {
+    let mut client = pg_client(host, port, user, password, database)?;
+    let rows = client
+        .query(
+            "SELECT c.conname::text, \
+             ns.nspname::text, cl.relname::text, \
+             fns.nspname::text, fcl.relname::text, \
+             ARRAY(SELECT a.attname::text \
+                   FROM unnest(c.conkey) WITH ORDINALITY AS u(num, ord) \
+                   JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = u.num \
+                   ORDER BY u.ord), \
+             ARRAY(SELECT af.attname::text \
+                   FROM unnest(c.confkey) WITH ORDINALITY AS uf(num, ord) \
+                   JOIN pg_attribute af ON af.attrelid = c.confrelid AND af.attnum = uf.num \
+                   ORDER BY uf.ord) \
+             FROM pg_constraint c \
+             JOIN pg_class cl ON cl.oid = c.conrelid \
+             JOIN pg_namespace ns ON ns.oid = cl.relnamespace \
+             JOIN pg_class fcl ON fcl.oid = c.confrelid \
+             JOIN pg_namespace fns ON fns.oid = fcl.relnamespace \
+             WHERE c.contype = 'f' \
+             AND ns.nspname NOT IN ('pg_catalog', 'information_schema') \
+             ORDER BY 2, 3, 1",
+            &[],
+        )
+        .map_err(|e| format!("Lecture des relations échouée : {}", pg_err_msg(&e)))?;
+    // Même convention de nommage que `pg_tables` : schéma omis pour « public ».
+    let name = |schema: String, table: String| {
+        if schema == "public" {
+            table
+        } else {
+            format!("{schema}.{table}")
+        }
+    };
+    Ok(rows
+        .iter()
+        .map(|r| DbRelation {
+            constraint: r.get(0),
+            from_table: name(r.get(1), r.get(2)),
+            to_table: name(r.get(3), r.get(4)),
+            from_columns: r.get(5),
+            to_columns: r.get(6),
+        })
+        .collect())
+}
+
+fn my_relations(
+    host: &str,
+    port: u16,
+    user: &str,
+    password: &str,
+    database: &str,
+) -> Result<Vec<DbRelation>, String> {
+    use mysql::prelude::Queryable;
+    let mut conn = my_conn(host, port, user, password, database)?;
+    let cell = |row: &mysql::Row, i: usize| my_value_to_string(row.as_ref(i));
+    let rows: Vec<mysql::Row> = conn
+        .query(
+            "SELECT CONSTRAINT_NAME, TABLE_NAME, COLUMN_NAME, \
+             REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME \
+             FROM information_schema.KEY_COLUMN_USAGE \
+             WHERE TABLE_SCHEMA = DATABASE() AND REFERENCED_TABLE_NAME IS NOT NULL \
+             ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION",
+        )
+        .map_err(|e| format!("Lecture des relations échouée : {e}"))?;
+    // Une ligne par colonne : on regroupe les clés composites par contrainte.
+    let mut out: Vec<DbRelation> = Vec::new();
+    for r in &rows {
+        let constraint = cell(r, 0).unwrap_or_default();
+        let from_table = cell(r, 1).unwrap_or_default();
+        let from_col = cell(r, 2).unwrap_or_default();
+        let to_table = cell(r, 3).unwrap_or_default();
+        let to_col = cell(r, 4).unwrap_or_default();
+        match out.last_mut() {
+            Some(last) if last.constraint == constraint && last.from_table == from_table => {
+                last.from_columns.push(from_col);
+                last.to_columns.push(to_col);
+            }
+            _ => out.push(DbRelation {
+                constraint,
+                from_table,
+                from_columns: vec![from_col],
+                to_table,
+                to_columns: vec![to_col],
+            }),
+        }
+    }
+    Ok(out)
+}
+
 /// Liste les noms de colonnes d'une table, dans l'ordre de déclaration. Sert à
 /// alimenter les listes déroulantes de l'onglet « Structure » (cible d'une clé
 /// étrangère notamment) sans relire toute la structure.
@@ -4449,6 +4730,7 @@ pub fn run() {
             db_table_rows,
             db_table_schema,
             db_table_columns,
+            db_graph,
             db_alter_table,
             db_delete_rows,
             db_update_cell,

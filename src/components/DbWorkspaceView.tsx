@@ -29,6 +29,9 @@ interface Props {
   onCloseTab: (id: string) => void;
   onRefreshTables: () => void;
   onClose: () => void;
+  /** true = l'onglet épinglé « Schéma » est affiché à la place d'une table. */
+  graphOpen: boolean;
+  onOpenGraph: () => void;
   /** Panneaux des onglets (tous montés, seul l'actif est visible). */
   children?: ReactNode;
 }
@@ -47,6 +50,8 @@ export function DbWorkspaceView({
   onCloseTab,
   onRefreshTables,
   onClose,
+  graphOpen,
+  onOpenGraph,
   children,
 }: Props) {
   const [q, setQ] = useState("");
@@ -124,7 +129,17 @@ export function DbWorkspaceView({
 
           <main className="dbws-main">
             <div className="dbws-tabs">
-              {tabs.length === 0 && <div className="console-empty-tab">Aucune table ouverte</div>}
+              {/* Onglet épinglé : schéma général, toujours disponible. */}
+              <div
+                className={"dbws-tab dbws-tab-pin" + (graphOpen ? " active" : "")}
+                onClick={onOpenGraph}
+                title="Schéma des relations de toute la base"
+              >
+                <span className="dbws-tab-name">🗺 Schéma</span>
+              </div>
+              {tabs.length === 0 && !graphOpen && (
+                <div className="console-empty-tab">Aucune table ouverte</div>
+              )}
               {tabs.map((t) => (
                 <div
                   key={t.id}
@@ -155,7 +170,7 @@ export function DbWorkspaceView({
               ))}
             </div>
             <div className="dbws-panel">
-              {tabs.length === 0 ? (
+              {tabs.length === 0 && !graphOpen ? (
                 <div className="empty">Sélectionnez une table à gauche pour l'ouvrir.</div>
               ) : (
                 children
