@@ -1,6 +1,6 @@
 [package]
 name = "devlauncher"
-version = "1.0.2"
+version = "1.0.3"
 description = "Launcher pour les micro-services (Tauri + React)"
 authors = ["SNCF"]
 edition = "2021"
