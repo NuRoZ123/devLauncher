@@ -11,13 +11,21 @@ export interface BranchModalState {
 
 interface Props {
   state: BranchModalState;
-  onConfirm: (branch: string) => void;
+  /** `isNew` = la branche n'existe ni en local ni en distant → à créer (`-b`). */
+  onConfirm: (branch: string, isNew: boolean) => void;
   onCancel: () => void;
 }
 
 export function BranchModal({ state, onConfirm, onCancel }: Props) {
   const [filter, setFilter] = useState("");
   const [selected, setSelected] = useState<string>("");
+
+  // Une branche est « nouvelle » si aucune branche connue (locale ou distante)
+  // ne porte ce nom : elle doit alors être créée (git checkout -b).
+  const confirm = (name: string) => {
+    if (!name) return;
+    onConfirm(name, !state.branches.some((b) => b.name === name));
+  };
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -64,7 +72,7 @@ export function BranchModal({ state, onConfirm, onCancel }: Props) {
             setSelected("");
           }}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && target) onConfirm(target);
+            if (e.key === "Enter" && target) confirm(target);
           }}
         />
 
@@ -83,7 +91,7 @@ export function BranchModal({ state, onConfirm, onCancel }: Props) {
                   (b.name === state.current ? " current" : "")
                 }
                 onClick={() => setSelected(b.name)}
-                onDoubleClick={() => onConfirm(b.name)}
+                onDoubleClick={() => confirm(b.name)}
               >
                 <span className="branch-ico">⎇</span>
                 {b.name}
@@ -97,7 +105,7 @@ export function BranchModal({ state, onConfirm, onCancel }: Props) {
             <button
               className={"branch-item new" + (selected === "" ? " sel" : "")}
               onClick={() => setSelected("")}
-              onDoubleClick={() => onConfirm(typed)}
+              onDoubleClick={() => confirm(typed)}
             >
               <span className="branch-ico">＋</span>
               Utiliser « {typed} »
@@ -112,7 +120,7 @@ export function BranchModal({ state, onConfirm, onCancel }: Props) {
           <button
             className="btn btn-primary"
             disabled={!target || target === state.current}
-            onClick={() => onConfirm(target)}
+            onClick={() => confirm(target)}
           >
             Basculer
           </button>

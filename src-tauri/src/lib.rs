@@ -227,6 +227,9 @@ struct Config {
     /// détectée automatiquement (remote git / package.json).
     #[serde(default)]
     project_links: HashMap<String, String>,
+    /// Actions du menu dépôt masquées par projet : id → clés d'actions masquées.
+    #[serde(default)]
+    repo_actions_hidden: HashMap<String, Vec<String>>,
     #[serde(default)]
     sequences: Vec<serde_json::Value>,
     #[serde(default)]

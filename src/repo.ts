@@ -17,6 +17,32 @@ export interface RepoLinks {
   newRequest: string | null;
 }
 
+/** Une entrée du menu dépôt : clé stable (pour la config), libellé, URL cible. */
+export interface RepoAction {
+  key: string;
+  label: string;
+  /** null si l'action dépend d'une branche indisponible. */
+  url: string | null;
+}
+
+/**
+ * Liste ordonnée des actions du menu dépôt à partir des liens construits. La
+ * `key` est stable (indépendante de la plateforme) et sert à masquer une action
+ * par projet (config `repo_actions_hidden`).
+ */
+export function repoActions(links: RepoLinks): RepoAction[] {
+  const gh = links.platform === "github";
+  return [
+    { key: "home", label: "Ouvrir le dépôt", url: links.home },
+    { key: "newRequest", label: gh ? "Créer une PR" : "Créer une MR", url: links.newRequest },
+    { key: "requests", label: gh ? "Pull requests" : "Merge requests", url: links.requests },
+    { key: "issues", label: "Issues", url: links.issues },
+    { key: "pipelines", label: gh ? "Actions (CI)" : "Pipelines", url: links.pipelines },
+    { key: "tree", label: "Branche courante", url: links.tree },
+    { key: "commits", label: "Commits", url: links.commits },
+  ];
+}
+
 /** Branches non exploitables pour un lien contextuel (vide, tiret, HEAD détaché). */
 const INVALID_BRANCH = new Set(["", "—", "HEAD"]);
 

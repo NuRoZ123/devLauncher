@@ -11,9 +11,11 @@ import { DbTableSchemaView, type DbSchemaState } from "./components/DbTableSchem
 import { DbRelationsView, type DbGraphState } from "./components/DbRelationsView";
 import { EnvModal, type EnvModalState } from "./components/EnvModal";
 import { PackageLinkModal, type LinkModalState } from "./components/PackageLinkModal";
+import { ProjectDetail } from "./components/ProjectDetail";
 import { ProjectRow } from "./components/ProjectRow";
 import { ProjectSources } from "./components/ProjectSources";
 import { RepoLinkModal } from "./components/RepoLinkModal";
+import { ScriptArgsModal } from "./components/ScriptArgsModal";
 import { SequenceManager } from "./components/SequenceManager";
 import { Setup } from "./components/Setup";
 import { StartCommandModal } from "./components/StartCommandModal";
@@ -31,6 +33,7 @@ import { GeneralSequenceModal } from "./components/GeneralSequenceModal";
 import { checkForUpdate, type UpdateAsset, type UpdateInfo } from "./update";
 import { expandActions, isSequenceValid } from "./sequences";
 import { parseEnv } from "./env";
+import { basename, dirname, samePath } from "./paths";
 import type {
   ActionDef,
   Config,
@@ -168,6 +171,8 @@ export default function App() {
   /** Téléchargement de l'installeur : nom en cours, chemin final, ou erreur. */
   const [dl, setDl] = useState<{ busy?: string; done?: string; error?: string }>({});
   const [view, setView] = useState<"dashboard" | "settings">("dashboard");
+  // Page de détail d'un projet : suivi par chemin (stable même si le type/id change).
+  const [detailPath, setDetailPath] = useState<string | null>(null);
 
   const [projects, setProjects] = useState<Project[]>([]);
   const [gitMap, setGitMap] = useState<Record<string, GitInfo>>({});
@@ -255,7 +260,9 @@ export default function App() {
   }, [splitPct]);
 
   const [branchModal, setBranchModal] = useState<BranchModalState | null>(null);
-  const branchResolver = useRef<((b: string | null) => void) | null>(null);
+  const branchResolver = useRef<
+    ((r: { branch: string; isNew: boolean } | null) => void) | null
+  >(null);
 
   const [envModal, setEnvModal] = useState<EnvModalState | null>(null);
   const [dbModal, setDbModal] = useState<DbModalState | null>(null);
@@ -297,10 +304,11 @@ export default function App() {
       if (dbWs) setDbWs(null);
       else if (jobsOpen) setJobsOpen(false);
       else if (view === "settings") setView("dashboard");
+      else if (detailPath) setDetailPath(null);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [dbWs, jobsOpen, view]);
+  }, [dbWs, jobsOpen, view, detailPath]);
 
   const bash = config?.git_bash_path ?? DEFAULT_GIT_BASH;
   const sources = config?.sources ?? NO_SOURCES;
@@ -658,7 +666,7 @@ export default function App() {
 
   // ----- Modal de branche (renvoie une promesse) -----
   const askBranch = useCallback(
-    (p: Project): Promise<string | null> => {
+    (p: Project): Promise<{ branch: string; isNew: boolean } | null> => {
       setBranchModal({
         projectId: p.id,
         projectName: p.name,
@@ -676,14 +684,14 @@ export default function App() {
         .catch(() =>
           setBranchModal((m) => (m && m.projectId === p.id ? { ...m, loading: false } : m)),
         );
-      return new Promise<string | null>((resolve) => {
+      return new Promise<{ branch: string; isNew: boolean } | null>((resolve) => {
         branchResolver.current = resolve;
       });
     },
     [bash, gitMap],
   );
 
-  function closeBranch(result: string | null) {
+  function closeBranch(result: { branch: string; isNew: boolean } | null) {
     branchResolver.current?.(result);
     branchResolver.current = null;
     setBranchModal(null);
@@ -991,13 +999,18 @@ export default function App() {
       const plan: StepPlan[] = [];
       for (const a of expandActions(seq, allActions, sequences)) {
         if (!actionAllowed(a, p)) continue;
-        let branch: string | undefined;
         if (a.needsBranch) {
           const b = await askBranch(p);
           if (!b) continue;
-          branch = b;
+          // Nouvelle branche → création (-b) au lieu d'un simple checkout.
+          const action =
+            b.isNew && a.command.includes("git checkout {branch}")
+              ? { ...a, command: a.command.replace("git checkout {branch}", "git checkout -b {branch}") }
+              : a;
+          plan.push({ action, branch: b.branch });
+        } else {
+          plan.push({ action: a });
         }
-        plan.push({ action: a, branch });
       }
       if (!plan.length) return;
       const job = createJob(`Séquence « ${seq.name} »`, p, plan);
@@ -1095,12 +1108,15 @@ export default function App() {
 
   const checkout = useCallback(
     async (p: Project) => {
-      const target = await askBranch(p);
-      if (!target || target === gitMap[p.id]?.branch) return;
+      const res = await askBranch(p);
+      if (!res || res.branch === gitMap[p.id]?.branch) return;
+      // Nouvelle branche → création (-b) ; sinon bascule simple (git crée le
+      // tracking local d'une branche distante au besoin).
+      const command = res.isNew ? "git checkout -b {branch}" : "git checkout {branch}";
       await runActionOn(
         p,
-        { id: "checkout", label: "Changer de branche", command: "git checkout {branch}" },
-        target,
+        { id: "checkout", label: "Changer de branche", command },
+        res.branch,
       );
     },
     [askBranch, gitMap, runActionOn],
@@ -2056,6 +2072,123 @@ export default function App() {
     [repoModal, config, persist],
   );
 
+  // ----- Page de détail d'un projet -----
+  const openDetail = useCallback((p: Project) => setDetailPath(p.path), []);
+
+  // Change le type d'un projet : met à jour sa source ET migre les réglages
+  // indexés par id (id = "<kind>:<name>", donc l'id change avec le type).
+  const changeProjectType = useCallback(
+    async (p: Project, kind: ProjectKind) => {
+      if (!config || p.kind === kind) return;
+      const oldId = p.id;
+      const newId = `${kind}:${p.name}`;
+      const nextSources = (config.sources ?? []).map((s) => {
+        if (s.mode === "single" && samePath(s.path, p.path)) return { ...s, type: kind };
+        if (s.mode === "parent" && samePath(s.path, dirname(p.path))) {
+          return { ...s, overrides: { ...(s.overrides ?? {}), [basename(p.path)]: kind } };
+        }
+        return s;
+      });
+      const renameKey = <T,>(m: Record<string, T> | undefined): Record<string, T> => {
+        const next = { ...(m ?? {}) };
+        if (oldId in next) {
+          next[newId] = next[oldId];
+          delete next[oldId];
+        }
+        return next;
+      };
+      await persist({
+        ...config,
+        sources: nextSources,
+        command_overrides: renameKey(config.command_overrides),
+        project_links: renameKey(config.project_links),
+        repo_actions_hidden: renameKey(config.repo_actions_hidden),
+        db_connections: renameKey(config.db_connections),
+        db_disabled: renameKey(config.db_disabled),
+        db_layouts: renameKey(config.db_layouts),
+      });
+    },
+    [config, persist],
+  );
+
+  const setProjectCommand = useCallback(
+    async (p: Project, cmd: string | null) => {
+      if (!config) return;
+      const next = { ...(config.command_overrides ?? {}) };
+      if (cmd == null) {
+        if (!(p.id in next)) return;
+        delete next[p.id];
+      } else {
+        if (next[p.id] === cmd) return;
+        next[p.id] = cmd;
+      }
+      await persist({ ...config, command_overrides: next });
+    },
+    [config, persist],
+  );
+
+  const setProjectRepo = useCallback(
+    async (p: Project, url: string | null) => {
+      if (!config) return;
+      const next = { ...(config.project_links ?? {}) };
+      if (url == null) {
+        if (!(p.id in next)) return;
+        delete next[p.id];
+      } else {
+        if (next[p.id] === url) return;
+        next[p.id] = url;
+      }
+      await persist({ ...config, project_links: next });
+    },
+    [config, persist],
+  );
+
+  const toggleDbDisabled = useCallback(
+    async (p: Project, disabled: boolean) => {
+      if (!config) return;
+      const next = { ...(config.db_disabled ?? {}) };
+      if (disabled) next[p.id] = true;
+      else delete next[p.id];
+      await persist({ ...config, db_disabled: next });
+    },
+    [config, persist],
+  );
+
+  const toggleRepoAction = useCallback(
+    async (p: Project, key: string, hidden: boolean) => {
+      if (!config) return;
+      const map = { ...(config.repo_actions_hidden ?? {}) };
+      const cur = new Set(map[p.id] ?? []);
+      if (hidden) cur.add(key);
+      else cur.delete(key);
+      if (cur.size) map[p.id] = [...cur];
+      else delete map[p.id];
+      await persist({ ...config, repo_actions_hidden: map });
+    },
+    [config, persist],
+  );
+
+  // ----- Arguments d'un script (clic droit sur un script du menu Actions) -----
+  const [scriptArgsModal, setScriptArgsModal] = useState<{
+    project: Project;
+    action: ActionDef;
+  } | null>(null);
+  const onRunScriptArgs = useCallback(
+    (p: Project, a: ActionDef) => setScriptArgsModal({ project: p, action: a }),
+    [],
+  );
+  const runScriptWithArgs = useCallback(
+    (args: string) => {
+      const m = scriptArgsModal;
+      setScriptArgsModal(null);
+      if (!m) return;
+      // Arguments passés au script après `--` (convention npm).
+      const command = args ? `${m.action.command} -- ${args}` : m.action.command;
+      void runActionOn(m.project, { ...m.action, command }, undefined);
+    },
+    [scriptArgsModal, runActionOn],
+  );
+
   // ----- Onglets console (ordre personnalisable) -----
   const consoleTabs = useMemo(() => {
     const ids = new Set<string>([
@@ -2091,6 +2224,15 @@ export default function App() {
     for (const p of projects) g[p.kind].push(p);
     return g;
   }, [projects]);
+
+  // Projet affiché en détail (suivi par chemin, stable au changement de type).
+  const detailProject = detailPath ? projects.find((p) => p.path === detailPath) ?? null : null;
+  // Referme la page si son projet a disparu (source retirée), hors période de scan.
+  useEffect(() => {
+    if (detailPath && !scanning && !projects.some((p) => p.path === detailPath)) {
+      setDetailPath(null);
+    }
+  }, [detailPath, scanning, projects]);
 
   const serviceSequences = useMemo(() => sequences.filter((s) => !s.global), [sequences]);
   const globalSequences = useMemo(() => sequences.filter((s) => !!s.global), [sequences]);
@@ -2316,6 +2458,31 @@ export default function App() {
           onPersist={persist}
           onClose={() => setView("dashboard")}
         />
+      ) : detailProject ? (
+        <ProjectDetail
+          key={detailProject.id}
+          project={detailProject}
+          config={config}
+          git={gitMap[detailProject.id]}
+          dbConn={config.db_connections?.[detailProject.id]}
+          dbDisabled={!!config.db_disabled?.[detailProject.id]}
+          running={running.has(detailProject.id)}
+          busy={busy[detailProject.id]}
+          onBack={() => setDetailPath(null)}
+          onChangeType={changeProjectType}
+          onSaveCommand={setProjectCommand}
+          onSaveRepo={setProjectRepo}
+          onStart={onStartRow}
+          onStop={onStopRow}
+          onEditEnv={openEnv}
+          onOpenUrl={openUrl}
+          onDbConfigure={openDb}
+          onDbOpenTables={openDbWorkspace}
+          onDbRetest={retestDb}
+          onToggleDbDisabled={toggleDbDisabled}
+          hiddenRepoActions={config.repo_actions_hidden?.[detailProject.id]}
+          onToggleRepoAction={toggleRepoAction}
+        />
       ) : (
         <div className="main" ref={mainRef}>
           <section className="projects" style={{ width: `${splitPct}%` }}>
@@ -2368,6 +2535,9 @@ export default function App() {
                       repoLink={repoLinkFor(p)}
                       onOpenUrl={openUrl}
                       onEditRepo={editRepo}
+                      onOpenDetail={openDetail}
+                      hiddenRepoActions={config?.repo_actions_hidden?.[p.id]}
+                      onRunScriptArgs={onRunScriptArgs}
                     />
                   ))}
                 </div>
@@ -2406,7 +2576,7 @@ export default function App() {
       {branchModal && (
         <BranchModal
           state={branchModal}
-          onConfirm={(b) => closeBranch(b)}
+          onConfirm={(branch, isNew) => closeBranch({ branch, isNew })}
           onCancel={() => closeBranch(null)}
         />
       )}
@@ -2567,6 +2737,15 @@ export default function App() {
           override={cmdModal.project ? cmdOverrides[cmdModal.project.id] ?? null : null}
           onSave={saveStartCommand}
           onCancel={() => setCmdModal(null)}
+        />
+      )}
+
+      {scriptArgsModal && (
+        <ScriptArgsModal
+          projectName={scriptArgsModal.project.name}
+          action={scriptArgsModal.action}
+          onRun={runScriptWithArgs}
+          onCancel={() => setScriptArgsModal(null)}
         />
       )}
 

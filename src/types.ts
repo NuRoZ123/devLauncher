@@ -370,6 +370,8 @@ export interface Config {
   command_overrides: Record<string, string>;
   /** Lien de dépôt personnalisé par projet : id → URL web. Prime sur l'URL détectée. */
   project_links: Record<string, string>;
+  /** Actions du menu dépôt masquées par projet : id → clés d'actions masquées. */
+  repo_actions_hidden?: Record<string, string[]>;
   sequences: Sequence[];
   custom_actions: ActionDef[];
   /** Couleur d'affichage par action : id d'action → couleur CSS ("#rrggbb"). */

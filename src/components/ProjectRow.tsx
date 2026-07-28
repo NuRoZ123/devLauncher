@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { actionAllowed } from "../constants";
-import { buildRepoLinks } from "../repo";
+import { buildRepoLinks, repoActions } from "../repo";
 import { expandActions, isSequenceValid } from "../sequences";
 import type {
   ActionDef,
@@ -53,6 +53,12 @@ interface Props {
   onOpenUrl: (url: string) => void;
   /** Ouvre l'édition du lien de dépôt (clic droit, ou clic si aucun lien). */
   onEditRepo: (p: Project) => void;
+  /** Ouvre la page de détail du projet (clic sur le nom). */
+  onOpenDetail: (p: Project) => void;
+  /** Clés d'actions du menu dépôt à masquer pour ce projet. */
+  hiddenRepoActions?: string[];
+  /** Clic droit sur un script du package.json : saisir des arguments avant exécution. */
+  onRunScriptArgs: (p: Project, a: ActionDef) => void;
 }
 
 /** Icône base de données (cylindre), hérite de la couleur du bouton. */
@@ -194,6 +200,9 @@ export const ProjectRow = memo(function ProjectRow({
   repoLink,
   onOpenUrl,
   onEditRepo,
+  onOpenDetail,
+  hiddenRepoActions,
+  onRunScriptArgs,
 }: Props) {
   const startable = project.start_command != null;
   const state = busy ? "busy" : running ? "run" : "stop";
@@ -393,7 +402,13 @@ export const ProjectRow = memo(function ProjectRow({
 
       <div className="project-main">
         <div className="project-title">
-          <span className="project-name">{project.name}</span>
+          <button
+            className="project-name project-name-btn"
+            title="Voir le détail du projet"
+            onClick={() => onOpenDetail(project)}
+          >
+            {project.name}
+          </button>
           <span className={"badge badge-" + project.kind}>{KIND_LABEL[project.kind]}</span>
         </div>
         <div className="project-sub">
@@ -622,33 +637,17 @@ export const ProjectRow = memo(function ProjectRow({
             {repoLinks.platform === "github" ? "GitHub" : "GitLab"} — {project.name}
           </div>
           <div className="menu-items">
-            <button className="menu-item" onClick={() => openUrlAndClose(repoLinks.home)}>
-              Ouvrir le dépôt
-            </button>
-            {repoLinks.newRequest && (
-              <button className="menu-item" onClick={() => openUrlAndClose(repoLinks.newRequest)}>
-                {repoLinks.platform === "github" ? "Créer une PR" : "Créer une MR"} — {git?.branch}
-              </button>
-            )}
-            <button className="menu-item" onClick={() => openUrlAndClose(repoLinks.requests)}>
-              {repoLinks.platform === "github" ? "Pull requests" : "Merge requests"}
-            </button>
-            <button className="menu-item" onClick={() => openUrlAndClose(repoLinks.issues)}>
-              Issues
-            </button>
-            <button className="menu-item" onClick={() => openUrlAndClose(repoLinks.pipelines)}>
-              {repoLinks.platform === "github" ? "Actions (CI)" : "Pipelines"}
-            </button>
-            {repoLinks.tree && (
-              <button className="menu-item" onClick={() => openUrlAndClose(repoLinks.tree)}>
-                Branche : {git?.branch}
-              </button>
-            )}
-            {repoLinks.commits && (
-              <button className="menu-item" onClick={() => openUrlAndClose(repoLinks.commits)}>
-                Commits
-              </button>
-            )}
+            {repoActions(repoLinks)
+              .filter((a) => a.url && !(hiddenRepoActions ?? []).includes(a.key))
+              .map((a) => (
+                <button
+                  key={a.key}
+                  className="menu-item"
+                  onClick={() => openUrlAndClose(a.url)}
+                >
+                  {a.label}
+                </button>
+              ))}
             <button
               className="menu-item"
               onClick={() => {
@@ -690,11 +689,17 @@ export const ProjectRow = memo(function ProjectRow({
                           <button
                             key={n.action.id}
                             className="menu-item"
-                            title={n.action.command}
+                            title={n.action.command + " · clic droit : arguments"}
                             onMouseEnter={scheduleCloseSub}
                             onClick={() => {
                               close();
                               onAction(project, n.action);
+                            }}
+                            onContextMenu={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              close();
+                              onRunScriptArgs(project, n.action);
                             }}
                           >
                             {n.action.label}
@@ -817,10 +822,16 @@ export const ProjectRow = memo(function ProjectRow({
                   <button
                     key={a.id}
                     className="menu-item"
-                    title={a.command}
+                    title={a.command + " · clic droit : arguments"}
                     onClick={() => {
                       close();
                       onAction(project, a);
+                    }}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      close();
+                      onRunScriptArgs(project, a);
                     }}
                   >
                     {suffix}

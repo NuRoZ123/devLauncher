@@ -3209,3 +3209,72 @@ button.db-table {
   gap: 8px;
   margin-top: 14px;
 }
+
+/* ---------------- Page de détail d'un projet ---------------- */
+.project-name-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  max-width: 100%;
+}
+.project-name-btn:hover {
+  color: var(--accent-2);
+  text-decoration: underline;
+}
+.detail-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 22px;
+  margin: 10px 0 2px;
+}
+.detail-path {
+  font-size: 12px;
+  word-break: break-all;
+}
+.detail-section {
+  margin-top: 22px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-soft);
+}
+.detail-section h2 {
+  margin: 0 0 10px;
+}
+.seg {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0;
+}
+.detail-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.detail-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+  margin-top: 12px;
+}
+.chk-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.cmd-preview {
+  margin: 12px 0 4px;
+  word-break: break-all;
+}
