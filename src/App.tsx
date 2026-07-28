@@ -13,6 +13,7 @@ import { EnvModal, type EnvModalState } from "./components/EnvModal";
 import { PackageLinkModal, type LinkModalState } from "./components/PackageLinkModal";
 import { ProjectRow } from "./components/ProjectRow";
 import { ProjectSources } from "./components/ProjectSources";
+import { RepoLinkModal } from "./components/RepoLinkModal";
 import { SequenceManager } from "./components/SequenceManager";
 import { Setup } from "./components/Setup";
 import { StartCommandModal } from "./components/StartCommandModal";
@@ -103,6 +104,7 @@ const MAX_LINES = 5000;
 // Identité stable pour « aucune exception » (évite de relancer le scan pour rien).
 const NO_OVERRIDES: Record<string, string> = {};
 const NO_COLORS: Record<string, string> = {};
+const NO_LINKS: Record<string, string> = {};
 const NO_SOURCES: ProjectSource[] = [];
 const KIND_ORDER: ProjectKind[] = ["service", "front", "package"];
 
@@ -304,6 +306,7 @@ export default function App() {
   const sources = config?.sources ?? NO_SOURCES;
   const startCmd = config?.start_command ?? "";
   const cmdOverrides = config?.command_overrides ?? NO_OVERRIDES;
+  const projectLinks = config?.project_links ?? NO_LINKS;
   const sequences = config?.sequences ?? [];
   const customActions = config?.custom_actions ?? [];
   const actionColors = config?.action_colors ?? NO_COLORS;
@@ -340,6 +343,7 @@ export default function App() {
           git_bash_path: c.git_bash_path || DEFAULT_GIT_BASH,
           start_command: c.start_command,
           command_overrides: c.command_overrides ?? NO_OVERRIDES,
+          project_links: c.project_links ?? {},
           sequences: c.sequences?.length ? c.sequences : DEFAULT_SEQUENCES,
           custom_actions: alreadySeeded ? (c.custom_actions ?? []) : seedActions(c.custom_actions ?? []),
           action_colors: c.action_colors ?? {},
@@ -1977,6 +1981,7 @@ export default function App() {
         git_bash_path: b,
         start_command: cmd,
         command_overrides: partialConfig?.command_overrides ?? {},
+        project_links: partialConfig?.project_links ?? {},
         sequences: partialConfig?.sequences?.length ? partialConfig.sequences : DEFAULT_SEQUENCES,
         custom_actions: seedActions(partialConfig?.custom_actions ?? []),
         action_colors: partialConfig?.action_colors ?? {},
@@ -2019,6 +2024,36 @@ export default function App() {
       }
     },
     [cmdModal, config, persist],
+  );
+
+  // ----- Lien de dépôt (ouverture + édition) -----
+  // Lien effectif d'un projet : override manuel (config), sinon URL détectée (git).
+  const repoLinkFor = useCallback(
+    (p: Project) => projectLinks[p.id] || gitMap[p.id]?.repo_url || "",
+    [projectLinks, gitMap],
+  );
+  const [repoModal, setRepoModal] = useState<{ project: Project } | null>(null);
+  const openUrl = useCallback((url: string) => {
+    if (url) void api.openUrl(url);
+  }, []);
+  const editRepo = useCallback((p: Project) => setRepoModal({ project: p }), []);
+  const saveRepoLink = useCallback(
+    async (url: string | null) => {
+      const m = repoModal;
+      setRepoModal(null);
+      if (!config || !m) return;
+      const next = { ...(config.project_links ?? {}) };
+      if (url == null) {
+        if (!(m.project.id in next)) return;
+        delete next[m.project.id]; // revient à la détection auto
+      } else {
+        if (next[m.project.id] === url) return;
+        next[m.project.id] = url;
+      }
+      // project_links ne fait pas partie des déclencheurs de scan : pas de rescan.
+      await persist({ ...config, project_links: next });
+    },
+    [repoModal, config, persist],
   );
 
   // ----- Onglets console (ordre personnalisable) -----
@@ -2330,6 +2365,9 @@ export default function App() {
                       dbTesting={dbTesting.has(p.id)}
                       dbDisabled={!!config?.db_disabled?.[p.id]}
                       onEditStartCommand={openProjectCommand}
+                      repoLink={repoLinkFor(p)}
+                      onOpenUrl={openUrl}
+                      onEditRepo={editRepo}
                     />
                   ))}
                 </div>
@@ -2529,6 +2567,16 @@ export default function App() {
           override={cmdModal.project ? cmdOverrides[cmdModal.project.id] ?? null : null}
           onSave={saveStartCommand}
           onCancel={() => setCmdModal(null)}
+        />
+      )}
+
+      {repoModal && (
+        <RepoLinkModal
+          project={repoModal.project}
+          autoUrl={gitMap[repoModal.project.id]?.repo_url ?? ""}
+          override={projectLinks[repoModal.project.id] ?? null}
+          onSave={saveRepoLink}
+          onCancel={() => setRepoModal(null)}
         />
       )}
 

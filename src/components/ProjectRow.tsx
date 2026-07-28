@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { actionAllowed } from "../constants";
+import { buildRepoLinks } from "../repo";
 import { expandActions, isSequenceValid } from "../sequences";
 import type {
   ActionDef,
@@ -46,6 +47,12 @@ interface Props {
   dbDisabled?: boolean;
   /** Ouvre l'édition de la commande de démarrage du projet (clic droit sur « Démarrer »). */
   onEditStartCommand: (p: Project) => void;
+  /** Lien effectif du dépôt (override manuel sinon détection auto), "" si aucun. */
+  repoLink?: string;
+  /** Ouvre une URL dans le navigateur (actions du menu dépôt). */
+  onOpenUrl: (url: string) => void;
+  /** Ouvre l'édition du lien de dépôt (clic droit, ou clic si aucun lien). */
+  onEditRepo: (p: Project) => void;
 }
 
 /** Icône base de données (cylindre), hérite de la couleur du bouton. */
@@ -65,6 +72,29 @@ function DbIcon() {
       <ellipse cx="8" cy="3.6" rx="5.4" ry="2.2" />
       <path d="M2.6 3.6v8.8c0 1.2 2.4 2.2 5.4 2.2s5.4-1 5.4-2.2V3.6" />
       <path d="M2.6 8c0 1.2 2.4 2.2 5.4 2.2s5.4-1 5.4-2.2" />
+    </svg>
+  );
+}
+
+/** Icône dépôt (branche git), hérite de la couleur du bouton. */
+function RepoIcon() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width="14"
+      height="14"
+      aria-hidden="true"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <circle cx="4.5" cy="3.5" r="1.6" />
+      <circle cx="4.5" cy="12.5" r="1.6" />
+      <circle cx="11.5" cy="5" r="1.6" />
+      <path d="M4.5 5.1v6" />
+      <path d="M11.5 6.6c0 2.2-1.6 3-3.5 3.4" />
     </svg>
   );
 }
@@ -161,6 +191,9 @@ export const ProjectRow = memo(function ProjectRow({
   dbTesting,
   dbDisabled,
   onEditStartCommand,
+  repoLink,
+  onOpenUrl,
+  onEditRepo,
 }: Props) {
   const startable = project.start_command != null;
   const state = busy ? "busy" : running ? "run" : "stop";
@@ -307,6 +340,53 @@ export const ProjectRow = memo(function ProjectRow({
     });
   }, [menuPos]);
 
+  // ----- Menu du bouton dépôt (liens contextuels : MR/PR, CI, branche…) -----
+  const repoBtnRef = useRef<HTMLButtonElement>(null);
+  const [repoMenu, setRepoMenu] = useState<{ x: number; y: number } | null>(null);
+  const repoLinks = repoLink ? buildRepoLinks(repoLink, git?.branch) : null;
+  // Recherche en cours : le git (donc l'URL auto) n'est pas encore chargé pour ce
+  // projet, et aucun lien manuel ne prend le relais. On neutralise le bouton pour
+  // ne pas laisser croire qu'on saisit une URL alors que la détection tourne.
+  const repoLoading = !repoLink && !git;
+  const closeRepoMenu = useCallback(() => setRepoMenu(null), []);
+  function toggleRepoMenu() {
+    if (repoMenu) {
+      closeRepoMenu();
+      return;
+    }
+    const r = repoBtnRef.current?.getBoundingClientRect();
+    if (r) setRepoMenu({ x: r.right, y: r.bottom + 4 });
+  }
+  useEffect(() => {
+    if (!repoMenu) return;
+    const onDown = (e: MouseEvent) => {
+      if (!(e.target instanceof Element && e.target.closest(".repo-menu"))) closeRepoMenu();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeRepoMenu();
+    };
+    document.addEventListener("mousedown", onDown, true);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown, true);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [repoMenu, closeRepoMenu]);
+  const openUrlAndClose = (url: string | null) => {
+    closeRepoMenu();
+    if (url) onOpenUrl(url);
+  };
+  const RM_W = 240;
+  const RM_H = 320;
+  const RM_MG = 8;
+  const repoMenuStyle: React.CSSProperties | undefined = repoMenu
+    ? {
+        position: "fixed",
+        left: Math.max(RM_MG, Math.min(repoMenu.x - RM_W, window.innerWidth - RM_W - RM_MG)),
+        top: Math.max(RM_MG, Math.min(repoMenu.y, window.innerHeight - RM_H - RM_MG)),
+      }
+    : undefined;
+
   return (
     <div className={"project-row state-" + state} onContextMenu={openAt}>
       <span className={"dot dot-" + (busy ? "busy" : running ? "run" : "stop")} />
@@ -450,6 +530,30 @@ export const ProjectRow = memo(function ProjectRow({
         )}
 
         <button
+          ref={repoBtnRef}
+          className={"btn btn-sm btn-repo" + (repoLink ? " on" : "") + (repoLoading ? " loading" : "")}
+          title={
+            repoLoading
+              ? "Recherche du dépôt…"
+              : repoLink
+                ? "Dépôt : liens GitLab / GitHub · clic droit : modifier le lien"
+                : "Lier un dépôt Git (clic pour configurer)"
+          }
+          onClick={() => {
+            if (repoLoading) return;
+            if (repoLink) toggleRepoMenu();
+            else onEditRepo(project);
+          }}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (!repoLoading) onEditRepo(project);
+          }}
+        >
+          {repoLoading ? <span className="spinner spinner-xs" /> : <RepoIcon />}
+        </button>
+
+        <button
           ref={actionsBtnRef}
           className="btn btn-ghost btn-sm"
           title="Actions (clic droit sur la ligne aussi). Empilable même si occupé."
@@ -507,6 +611,56 @@ export const ProjectRow = memo(function ProjectRow({
           </span>
         )}
       </div>
+
+      {repoMenu && repoLinks && (
+        <div
+          className="context-menu repo-menu"
+          style={repoMenuStyle}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <div className="menu-title" title={repoLink}>
+            {repoLinks.platform === "github" ? "GitHub" : "GitLab"} — {project.name}
+          </div>
+          <div className="menu-items">
+            <button className="menu-item" onClick={() => openUrlAndClose(repoLinks.home)}>
+              Ouvrir le dépôt
+            </button>
+            {repoLinks.newRequest && (
+              <button className="menu-item" onClick={() => openUrlAndClose(repoLinks.newRequest)}>
+                {repoLinks.platform === "github" ? "Créer une PR" : "Créer une MR"} — {git?.branch}
+              </button>
+            )}
+            <button className="menu-item" onClick={() => openUrlAndClose(repoLinks.requests)}>
+              {repoLinks.platform === "github" ? "Pull requests" : "Merge requests"}
+            </button>
+            <button className="menu-item" onClick={() => openUrlAndClose(repoLinks.issues)}>
+              Issues
+            </button>
+            <button className="menu-item" onClick={() => openUrlAndClose(repoLinks.pipelines)}>
+              {repoLinks.platform === "github" ? "Actions (CI)" : "Pipelines"}
+            </button>
+            {repoLinks.tree && (
+              <button className="menu-item" onClick={() => openUrlAndClose(repoLinks.tree)}>
+                Branche : {git?.branch}
+              </button>
+            )}
+            {repoLinks.commits && (
+              <button className="menu-item" onClick={() => openUrlAndClose(repoLinks.commits)}>
+                Commits
+              </button>
+            )}
+            <button
+              className="menu-item"
+              onClick={() => {
+                closeRepoMenu();
+                onEditRepo(project);
+              }}
+            >
+              Modifier le lien…
+            </button>
+          </div>
+        </div>
+      )}
 
       {menuPos && (
         <>

@@ -154,6 +154,32 @@ code {
 .btn-db.db-unverified:hover:not(:disabled) {
   background: var(--yellow-bg);
 }
+/* Bouton dépôt : atténué sans lien, coloré (accent) quand un lien existe. */
+.btn-repo {
+  background: transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.1rem;
+  padding: 7px 9px;
+  color: var(--muted);
+}
+.btn-repo:hover:not(:disabled) {
+  color: var(--text);
+}
+.btn-repo.on {
+  color: var(--accent-2);
+  border-color: transparent;
+  background: #1d2b40;
+}
+.btn-repo.on:hover:not(:disabled) {
+  background: #24334a;
+}
+/* Recherche de l'URL en cours (scan) : spinner, non cliquable visuellement. */
+.btn-repo.loading {
+  cursor: default;
+  color: var(--text-dim);
+}
 .btn-disabled {
   background: transparent;
   border-style: dashed;

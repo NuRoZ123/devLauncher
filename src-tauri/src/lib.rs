@@ -223,6 +223,10 @@ struct Config {
     /// Exceptions par projet : id ("service:nom", "front:…") → commande dédiée.
     #[serde(default)]
     command_overrides: HashMap<String, String>,
+    /// Lien de dépôt personnalisé par projet : id → URL web. Prime sur l'URL
+    /// détectée automatiquement (remote git / package.json).
+    #[serde(default)]
+    project_links: HashMap<String, String>,
     #[serde(default)]
     sequences: Vec<serde_json::Value>,
     #[serde(default)]
@@ -277,6 +281,9 @@ struct GitInfo {
     branch: String,
     changes: u32,
     dirty: bool,
+    /// URL web du dépôt (déduite du remote origin, sinon du package.json). Vide
+    /// si introuvable. Sert au bouton « ouvrir le dépôt ».
+    repo_url: String,
 }
 
 #[derive(Serialize)]
@@ -1086,14 +1093,75 @@ async fn list_subdirs(path: String) -> Result<Vec<String>, String> {
 // Git
 // ---------------------------------------------------------------------------
 
+/// Convertit une URL de dépôt (remote git ou champ `repository` du package.json)
+/// en URL web ouvrable. Renvoie None si la forme n'est pas reconnue.
+fn normalize_repo_url(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // package.json : "git+https://…", "git+ssh://…"
+    let s = s.strip_prefix("git+").unwrap_or(s);
+    let strip_git = |u: &str| u.strip_suffix(".git").unwrap_or(u).to_string();
+
+    // scp-like : git@host:group/repo.git
+    if let Some(rest) = s.strip_prefix("git@") {
+        if let Some((host, path)) = rest.split_once(':') {
+            return Some(format!("https://{}/{}", host, strip_git(path.trim_start_matches('/'))));
+        }
+    }
+    // ssh://git@host[:port]/group/repo.git
+    if let Some(rest) = s.strip_prefix("ssh://") {
+        let rest = rest.strip_prefix("git@").unwrap_or(rest);
+        // Retire un éventuel :port entre l'hôte et le chemin.
+        if let Some((hostport, path)) = rest.split_once('/') {
+            let host = hostport.split(':').next().unwrap_or(hostport);
+            return Some(format!("https://{}/{}", host, strip_git(path)));
+        }
+    }
+    // http(s) déjà web : on retire juste le suffixe .git
+    if s.starts_with("http://") || s.starts_with("https://") {
+        return Some(strip_git(s));
+    }
+    // Raccourcis npm : github:user/repo, gitlab:group/repo, bitbucket:…
+    for (prefix, host) in [
+        ("github:", "github.com"),
+        ("gitlab:", "gitlab.com"),
+        ("bitbucket:", "bitbucket.org"),
+    ] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            return Some(format!("https://{}/{}", host, strip_git(rest)));
+        }
+    }
+    None
+}
+
+/// Cherche l'URL du dépôt dans le champ `repository` du package.json.
+fn repo_url_from_package_json(dir: &Path) -> Option<String> {
+    let txt = std::fs::read_to_string(dir.join("package.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
+    let repo = v.get("repository")?;
+    let raw = if let Some(s) = repo.as_str() {
+        s.to_string()
+    } else {
+        repo.get("url")?.as_str()?.to_string()
+    };
+    normalize_repo_url(&raw)
+}
+
 #[tauri::command]
 async fn git_info(bash: String, path: String) -> Result<GitInfo, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let script = "printf '%s\\n' \"$(git rev-parse --abbrev-ref HEAD 2>/dev/null)\" \"$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')\"";
+        let script = "printf '%s\\n' \"$(git rev-parse --abbrev-ref HEAD 2>/dev/null)\" \"$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')\" \"$(git config --get remote.origin.url 2>/dev/null)\"";
         let out = run_capture(&bash, &path, script)?;
         let mut lines = out.lines();
         let branch = lines.next().unwrap_or("").trim().to_string();
         let changes: u32 = lines.next().unwrap_or("0").trim().parse().unwrap_or(0);
+        let remote_raw = lines.next().unwrap_or("").trim();
+        // Priorité au remote git ; repli sur le package.json si absent/non standard.
+        let repo_url = normalize_repo_url(remote_raw)
+            .or_else(|| repo_url_from_package_json(Path::new(&path)))
+            .unwrap_or_default();
         Ok(GitInfo {
             branch: if branch.is_empty() {
                 "—".to_string()
@@ -1102,6 +1170,7 @@ async fn git_info(bash: String, path: String) -> Result<GitInfo, String> {
             },
             changes,
             dirty: changes > 0,
+            repo_url,
         })
     })
     .await

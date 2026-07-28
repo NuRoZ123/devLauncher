@@ -41,6 +41,8 @@ export interface GitInfo {
   branch: string;
   changes: number;
   dirty: boolean;
+  /** URL web du dépôt (remote origin ou package.json), vide si introuvable. */
+  repo_url: string;
 }
 
 export interface BranchInfo {
@@ -366,6 +368,8 @@ export interface Config {
   start_command: string;
   /** Exceptions par projet : id ("service:nom", "front:…") → commande dédiée. */
   command_overrides: Record<string, string>;
+  /** Lien de dépôt personnalisé par projet : id → URL web. Prime sur l'URL détectée. */
+  project_links: Record<string, string>;
   sequences: Sequence[];
   custom_actions: ActionDef[];
   /** Couleur d'affichage par action : id d'action → couleur CSS ("#rrggbb"). */
