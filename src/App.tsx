@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, autostart, onLogs, onStatus, pickBashExe } from "./api";
 import { BranchModal, type BranchModalState } from "./components/BranchModal";
 import { Console } from "./components/Console";
@@ -253,6 +253,42 @@ export default function App() {
   });
   const mainRef = useRef<HTMLDivElement>(null);
   const draggingSplit = useRef(false);
+
+  // Repli progressif des lignes de projet selon la largeur du volet. La mesure est
+  // recalculée à chaque changement de `splitPct` (glissement du splitter → re-rendu
+  // React garanti) et via ResizeObserver + resize fenêtre en filet. L'état n'est mis
+  // à jour qu'au franchissement d'un palier (pas de re-rendu à chaque pixel).
+  // Seuils sur clientWidth (padding inclus). Facilement ajustables.
+  const projectsRef = useRef<HTMLElement>(null);
+  const [rowLayout, setRowLayout] = useState({ dense: false, hidePort: false, fold: false });
+  const measurePanel = useCallback(() => {
+    const el = projectsRef.current;
+    if (!el) return;
+    const w = el.clientWidth;
+    const next = { dense: w < 560, hidePort: w < 520, fold: w < 480 };
+    setRowLayout((prev) =>
+      prev.dense === next.dense && prev.hidePort === next.hidePort && prev.fold === next.fold
+        ? prev
+        : next,
+    );
+  }, []);
+  // Mesure directe après chaque re-rendu déclenché par le splitter, l'arrivée des
+  // projets ou un changement de vue (le volet se (re)monte). useLayoutEffect : avant
+  // peinture, pas de scintillement.
+  useLayoutEffect(() => {
+    measurePanel();
+  }, [measurePanel, splitPct, view, detailPath, projects.length]);
+  useEffect(() => {
+    const el = projectsRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => measurePanel());
+    ro.observe(el);
+    window.addEventListener("resize", measurePanel);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", measurePanel);
+    };
+  }, [measurePanel, view, detailPath]);
 
   // Mémorise la largeur du panneau (persistée entre les sessions).
   useEffect(() => {
@@ -2485,7 +2521,7 @@ export default function App() {
         />
       ) : (
         <div className="main" ref={mainRef}>
-          <section className="projects" style={{ width: `${splitPct}%` }}>
+          <section className="projects" ref={projectsRef} style={{ width: `${splitPct}%` }}>
             {scanError && <div className="banner-error">{scanError}</div>}
 
             {scanning && projects.length === 0 && (
@@ -2538,6 +2574,9 @@ export default function App() {
                       onOpenDetail={openDetail}
                       hiddenRepoActions={config?.repo_actions_hidden?.[p.id]}
                       onRunScriptArgs={onRunScriptArgs}
+                      dense={rowLayout.dense}
+                      hidePort={rowLayout.hidePort}
+                      foldSecondary={rowLayout.fold}
                     />
                   ))}
                 </div>

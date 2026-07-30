@@ -59,6 +59,13 @@ interface Props {
   hiddenRepoActions?: string[];
   /** Clic droit sur un script du package.json : saisir des arguments avant exécution. */
   onRunScriptArgs: (p: Project, a: ActionDef) => void;
+  /** Palier « réduit » : le badge de type devient une pastille de couleur. */
+  dense?: boolean;
+  /** Palier « réduit » : masque le port informatif (l'alerte port occupé reste). */
+  hidePort?: boolean;
+  /** Palier « étroit » : .env / BDD / dépôt se replient dans le menu ⋯ pour laisser
+   *  la place au nom du projet. */
+  foldSecondary?: boolean;
 }
 
 /** Icône base de données (cylindre), hérite de la couleur du bouton. */
@@ -101,6 +108,55 @@ function RepoIcon() {
       <circle cx="11.5" cy="5" r="1.6" />
       <path d="M4.5 5.1v6" />
       <path d="M11.5 6.6c0 2.2-1.6 3-3.5 3.4" />
+    </svg>
+  );
+}
+
+/** Icône console (terminal). */
+function TerminalIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 4l3.2 4L3 12" />
+      <path d="M8.4 12H13" />
+    </svg>
+  );
+}
+
+/** Icône fichier .env. */
+function EnvIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 2h5l3 3v9H4z" />
+      <path d="M9 2v3h3" />
+    </svg>
+  );
+}
+
+/** Icône « ⋯ » du menu d'actions. */
+function DotsIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="currentColor">
+      <circle cx="3.5" cy="8" r="1.3" />
+      <circle cx="8" cy="8" r="1.3" />
+      <circle cx="12.5" cy="8" r="1.3" />
+    </svg>
+  );
+}
+
+/** Icône lecture (démarrer). */
+function PlayIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="currentColor">
+      <path d="M4.5 3.2v9.6l8-4.8z" />
+    </svg>
+  );
+}
+
+/** Icône stop (arrêter). */
+function StopIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="currentColor">
+      <rect x="3.8" y="3.8" width="8.4" height="8.4" rx="1.2" />
     </svg>
   );
 }
@@ -203,6 +259,9 @@ export const ProjectRow = memo(function ProjectRow({
   onOpenDetail,
   hiddenRepoActions,
   onRunScriptArgs,
+  dense,
+  hidePort,
+  foldSecondary,
 }: Props) {
   const startable = project.start_command != null;
   const state = busy ? "busy" : running ? "run" : "stop";
@@ -268,9 +327,34 @@ export const ProjectRow = memo(function ProjectRow({
     setOpenSub({ node, x, y });
   };
 
+  // Palier étroit : le menu du bouton ⋯ est compact (.env / BDD / « Actions ▸ »).
+  // Survoler « Actions ▸ » déploie le menu d'actions complet en flyout latéral.
+  const [actionsFlyout, setActionsFlyout] = useState<{ x: number; y: number } | null>(null);
+  const flyoutTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelCloseFlyout = () => {
+    if (flyoutTimer.current) clearTimeout(flyoutTimer.current);
+  };
+  const scheduleCloseFlyout = () => {
+    cancelCloseFlyout();
+    flyoutTimer.current = setTimeout(() => setActionsFlyout(null), 160);
+  };
+  const openActionsFlyoutAt = (e: React.MouseEvent) => {
+    cancelCloseFlyout();
+    const r = e.currentTarget.getBoundingClientRect();
+    const m = 8;
+    const w = 240;
+    let x = r.right - 2;
+    if (x + w > window.innerWidth - m) x = r.left - w + 2;
+    x = Math.max(m, x);
+    const y = Math.max(m, Math.min(r.top, window.innerHeight - 260 - m));
+    setActionsFlyout({ x, y });
+  };
+
   const close = useCallback(() => {
     if (subTimer.current) clearTimeout(subTimer.current);
+    if (flyoutTimer.current) clearTimeout(flyoutTimer.current);
     setOpenSub(null);
+    setActionsFlyout(null);
     setMenuPos(null);
   }, []);
 
@@ -396,12 +480,163 @@ export const ProjectRow = memo(function ProjectRow({
       }
     : undefined;
 
+  // Modifications non commitées : le compteur (● N) est masqué au palier réduit.
+  // La puce d'état à gauche garde son sens d'origine : gris = arrêté, vert = lancé,
+  // orange = tâche en cours (busy).
+  const dirty = !!git && git.changes > 0;
+
+  // Service pouvant exposer une BDD (bouton/entrée base de données).
+  const dbEligible = project.kind === "service" && project.has_env && !dbDisabled;
+  // Y a-t-il des actions repliées (.env / BDD) ? Si oui, le menu ⋯ devient compact
+  // et le menu d'actions complet passe en flyout sous « Actions ▸ ».
+  const hasFolded = !!foldSecondary && (project.has_env || dbEligible);
+
+  // Contenu du menu d'actions catégorisé (cycle de vie, scripts, git, séquences…).
+  // Rendu directement dans le menu ⋯ en mode large, ou en flyout (« Actions ▸ »)
+  // au palier étroit.
+  const renderActionGroups = () => (
+    <>
+      {groups.map(({ cat, items }) => {
+        const open = !collapsed.has(cat.id);
+        return (
+          <div className="menu-group" key={cat.id}>
+            <button className="menu-head" onClick={() => toggleCat(cat.id)}>
+              <span className={"menu-chevron" + (open ? " open" : "")}>▸</span>
+              <span className="menu-head-label">{cat.label}</span>
+              <span className="menu-count">{items.length}</span>
+            </button>
+            {open && cat.id === "scripts" && (
+              <div className="menu-items menu-grid">
+                {groupScripts(items).map((n) =>
+                  n.kind === "leaf" ? (
+                    <button
+                      key={n.action.id}
+                      className="menu-item"
+                      title={n.action.command + " · clic droit : arguments"}
+                      onMouseEnter={scheduleCloseSub}
+                      onClick={() => {
+                        close();
+                        onAction(project, n.action);
+                      }}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        close();
+                        onRunScriptArgs(project, n.action);
+                      }}
+                    >
+                      {n.action.label}
+                    </button>
+                  ) : (
+                    <button
+                      key={"branch:" + n.prefix}
+                      className={
+                        "menu-item menu-has-sub" +
+                        (openSub?.node.prefix === n.prefix ? " active" : "")
+                      }
+                      title={`${n.children.length} variantes`}
+                      onMouseEnter={(e) => openSubAt(n, e)}
+                      onMouseLeave={scheduleCloseSub}
+                      onClick={(e) => openSubAt(n, e)}
+                    >
+                      <span className="menu-has-sub-label">{n.prefix}</span>
+                      <span className="menu-sub-caret">▸</span>
+                    </button>
+                  ),
+                )}
+              </div>
+            )}
+            {open && cat.id !== "scripts" && (
+              <div className={"menu-items" + (cat.grid ? " menu-grid" : "")}>
+                {items.map((a) => (
+                  <button
+                    key={a.id}
+                    className={"menu-item" + (a.danger ? " menu-danger" : "")}
+                    style={a.color ? ({ "--item-color": a.color } as React.CSSProperties) : undefined}
+                    title={a.command || a.label}
+                    onMouseEnter={scheduleCloseSub}
+                    onClick={() => {
+                      close();
+                      if (a.needsBranch) onCheckout(project);
+                      else onAction(project, a);
+                    }}
+                  >
+                    {a.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {menuSequences.length > 0 &&
+        (() => {
+          const open = !collapsed.has("sequences");
+          return (
+            <div className="menu-group">
+              <button className="menu-head" onClick={() => toggleCat("sequences")}>
+                <span className={"menu-chevron" + (open ? " open" : "")}>▸</span>
+                <span className="menu-head-label">Séquences</span>
+                <span className="menu-count">{menuSequences.length}</span>
+              </button>
+              {open && (
+                <div className="menu-items">
+                  {menuSequences.map(({ seq, valid }) =>
+                    valid ? (
+                      <button
+                        key={seq.id}
+                        className="menu-item menu-seq"
+                        style={seq.color ? ({ "--item-color": seq.color } as React.CSSProperties) : undefined}
+                        onClick={() => {
+                          close();
+                          onSequence(project, seq);
+                        }}
+                      >
+                        ⛓ {seq.name}
+                      </button>
+                    ) : (
+                      <button
+                        key={seq.id}
+                        className="menu-item menu-seq menu-item-invalid"
+                        disabled
+                        title="Séquence invalide : une action ou séquence a été supprimée"
+                      >
+                        ⚠ {seq.name}
+                      </button>
+                    ),
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
+      <div className="menu-sep" />
+      <button
+        className="menu-item"
+        onClick={() => {
+          close();
+          onRefreshGit(project);
+        }}
+      >
+        ↻ Rafraîchir l'état git
+      </button>
+    </>
+  );
+
   return (
     <div className={"project-row state-" + state} onContextMenu={openAt}>
       <span className={"dot dot-" + (busy ? "busy" : running ? "run" : "stop")} />
 
       <div className="project-main">
         <div className="project-title">
+          {dense && (
+            <span
+              className={"kind-dot kind-dot-" + project.kind}
+              title={KIND_LABEL[project.kind]}
+            />
+          )}
           <button
             className="project-name project-name-btn"
             title="Voir le détail du projet"
@@ -409,20 +644,24 @@ export const ProjectRow = memo(function ProjectRow({
           >
             {project.name}
           </button>
-          <span className={"badge badge-" + project.kind}>{KIND_LABEL[project.kind]}</span>
+          {!dense && <span className={"badge badge-" + project.kind}>{KIND_LABEL[project.kind]}</span>}
         </div>
         <div className="project-sub">
           <button
             className="chip chip-branch"
-            title="Changer de branche"
+            title={git ? `Branche ${git.branch} — changer de branche` : "Changer de branche"}
             onClick={() => onCheckout(project)}
           >
             <span className="chip-ico">⌥</span>
-            {git ? git.branch : <span className="spinner spinner-xs" />}
+            {git ? (
+              <span className="chip-branch-txt">{git.branch}</span>
+            ) : (
+              <span className="spinner spinner-xs" />
+            )}
           </button>
-          {git && git.changes > 0 && (
+          {dirty && !hidePort && (
             <span className="chip chip-dirty" title="Modifications non commitées">
-              ● {git.changes}
+              ● {git!.changes}
             </span>
           )}
           {project.port != null &&
@@ -449,6 +688,10 @@ export const ProjectRow = memo(function ProjectRow({
                   </span>
                 );
               }
+              // Palier réduit : on masque le port purement informatif (libre ou en
+              // écoute) pour laisser la place à la branche. L'alerte « port occupé »
+              // ci-dessus reste, elle, toujours visible (elle porte une action).
+              if (hidePort) return null;
               if (inUse && (owned || running)) {
                 return (
                   <span className="chip chip-port-active" title="Service en écoute (lancé par l'app)">
@@ -462,7 +705,7 @@ export const ProjectRow = memo(function ProjectRow({
                 </span>
               );
             })()}
-          {testResult && (testResult.total > 0 || testResult.exit_code !== 0) && (
+          {!hidePort && testResult && (testResult.total > 0 || testResult.exit_code !== 0) && (
             <span
               className={"chip chip-test " + (testResult.failed > 0 ? "test-ko" : "test-ok")}
               title={`Tests : ${testResult.passed} passés, ${testResult.failed} échoués, ${testResult.total} total`}
@@ -482,33 +725,35 @@ export const ProjectRow = memo(function ProjectRow({
               )}
             </span>
           )}
-          {busy && <span className="chip chip-busy">{busy}…</span>}
+          {busy && !hidePort && <span className="chip chip-busy">{busy}…</span>}
         </div>
       </div>
 
       <div className="project-actions">
         <button
-          className="btn btn-ghost btn-sm"
+          className="btn btn-ghost btn-sm btn-ico"
           title="Voir la console"
+          aria-label="Voir la console"
           onClick={() => onOpenConsole(project)}
         >
-          Console
+          <TerminalIcon />
         </button>
 
-        {project.has_env && (
+        {project.has_env && !foldSecondary && (
           <button
-            className="btn btn-ghost btn-sm"
+            className="btn btn-ghost btn-sm btn-ico"
             title="Afficher / modifier le fichier .env"
+            aria-label="Modifier le .env"
             onClick={() => onEditEnv(project)}
           >
-            .env
+            <EnvIcon />
           </button>
         )}
 
-        {project.kind === "service" && project.has_env && !dbDisabled && (
+        {project.kind === "service" && project.has_env && !dbDisabled && !foldSecondary && (
           <button
             className={
-              "btn btn-sm btn-db" +
+              "btn btn-sm btn-ico btn-db" +
               (dbConn ? (dbConn.verified ? " db-ok" : " db-unverified") : "")
             }
             disabled={dbTesting}
@@ -546,7 +791,7 @@ export const ProjectRow = memo(function ProjectRow({
 
         <button
           ref={repoBtnRef}
-          className={"btn btn-sm btn-repo" + (repoLink ? " on" : "") + (repoLoading ? " loading" : "")}
+          className={"btn btn-sm btn-ico btn-repo" + (repoLink ? " on" : "") + (repoLoading ? " loading" : "")}
           title={
             repoLoading
               ? "Recherche du dépôt…"
@@ -570,11 +815,12 @@ export const ProjectRow = memo(function ProjectRow({
 
         <button
           ref={actionsBtnRef}
-          className="btn btn-ghost btn-sm"
+          className="btn btn-ghost btn-sm btn-ico"
           title="Actions (clic droit sur la ligne aussi). Empilable même si occupé."
+          aria-label="Actions"
           onClick={openFromButton}
         >
-          Actions ▾
+          <DotsIcon />
         </button>
 
         {project.kind === "package" &&
@@ -602,12 +848,18 @@ export const ProjectRow = memo(function ProjectRow({
 
         {startable ? (
           running ? (
-            <button className="btn btn-stop btn-sm" disabled={!!busy} onClick={() => onStop(project)}>
-              ■ Arrêter
+            <button
+              className="btn btn-stop btn-sm btn-ico"
+              disabled={!!busy}
+              onClick={() => onStop(project)}
+              title="Arrêter le service"
+              aria-label="Arrêter le service"
+            >
+              <StopIcon />
             </button>
           ) : (
             <button
-              className="btn btn-start btn-sm"
+              className="btn btn-start btn-sm btn-ico"
               disabled={!!busy}
               onClick={() => onStart(project)}
               onContextMenu={(e) => {
@@ -615,9 +867,10 @@ export const ProjectRow = memo(function ProjectRow({
                 e.stopPropagation();
                 onEditStartCommand(project);
               }}
-              title={`Commande : ${project.start_command} — clic droit pour la modifier`}
+              title={`Démarrer — ${project.start_command} · clic droit pour modifier la commande`}
+              aria-label="Démarrer le service"
             >
-              ▶ Démarrer
+              <PlayIcon />
             </button>
           )
         ) : (
@@ -673,133 +926,81 @@ export const ProjectRow = memo(function ProjectRow({
               {project.name}
             </div>
 
-            {groups.map(({ cat, items }) => {
-              const open = !collapsed.has(cat.id);
-              return (
-                <div className="menu-group" key={cat.id}>
-                  <button className="menu-head" onClick={() => toggleCat(cat.id)}>
-                    <span className={"menu-chevron" + (open ? " open" : "")}>▸</span>
-                    <span className="menu-head-label">{cat.label}</span>
-                    <span className="menu-count">{items.length}</span>
+            {hasFolded ? (
+              <div className="menu-items menu-folded">
+                {project.has_env && (
+                  <button
+                    className="menu-item menu-item-ico"
+                    onClick={() => {
+                      close();
+                      onEditEnv(project);
+                    }}
+                  >
+                    <span className="menu-item-ico-glyph"><EnvIcon /></span> .env
                   </button>
-                  {open && cat.id === "scripts" && (
-                    <div className="menu-items menu-grid">
-                      {groupScripts(items).map((n) =>
-                        n.kind === "leaf" ? (
-                          <button
-                            key={n.action.id}
-                            className="menu-item"
-                            title={n.action.command + " · clic droit : arguments"}
-                            onMouseEnter={scheduleCloseSub}
-                            onClick={() => {
-                              close();
-                              onAction(project, n.action);
-                            }}
-                            onContextMenu={(e) => {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              close();
-                              onRunScriptArgs(project, n.action);
-                            }}
-                          >
-                            {n.action.label}
-                          </button>
-                        ) : (
-                          <button
-                            key={"branch:" + n.prefix}
-                            className={
-                              "menu-item menu-has-sub" +
-                              (openSub?.node.prefix === n.prefix ? " active" : "")
-                            }
-                            title={`${n.children.length} variantes`}
-                            onMouseEnter={(e) => openSubAt(n, e)}
-                            onMouseLeave={scheduleCloseSub}
-                            onClick={(e) => openSubAt(n, e)}
-                          >
-                            <span className="menu-has-sub-label">{n.prefix}</span>
-                            <span className="menu-sub-caret">▸</span>
-                          </button>
-                        ),
-                      )}
-                    </div>
-                  )}
-                  {open && cat.id !== "scripts" && (
-                    <div className={"menu-items" + (cat.grid ? " menu-grid" : "")}>
-                      {items.map((a) => (
-                        <button
-                          key={a.id}
-                          className={"menu-item" + (a.danger ? " menu-danger" : "")}
-                          style={a.color ? ({ "--item-color": a.color } as React.CSSProperties) : undefined}
-                          title={a.command || a.label}
-                          onMouseEnter={scheduleCloseSub}
-                          onClick={() => {
+                )}
+                {dbEligible && (
+                  <button
+                    className="menu-item menu-item-ico"
+                    onClick={() => {
+                      close();
+                      if (dbConn) {
+                        if (dbConn.verified) onDbOpenTables(project);
+                        else onDbRetest(project);
+                      } else onDbConnect(project);
+                    }}
+                    onContextMenu={
+                      dbConn
+                        ? (e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
                             close();
-                            if (a.needsBranch) onCheckout(project);
-                            else onAction(project, a);
-                          }}
-                        >
-                          {a.label}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-
-            {menuSequences.length > 0 &&
-              (() => {
-                const open = !collapsed.has("sequences");
-                return (
-                  <div className="menu-group">
-                    <button className="menu-head" onClick={() => toggleCat("sequences")}>
-                      <span className={"menu-chevron" + (open ? " open" : "")}>▸</span>
-                      <span className="menu-head-label">Séquences</span>
-                      <span className="menu-count">{menuSequences.length}</span>
-                    </button>
-                    {open && (
-                      <div className="menu-items">
-                        {menuSequences.map(({ seq, valid }) =>
-                          valid ? (
-                            <button
-                              key={seq.id}
-                              className="menu-item menu-seq"
-                              style={seq.color ? ({ "--item-color": seq.color } as React.CSSProperties) : undefined}
-                              onClick={() => {
-                                close();
-                                onSequence(project, seq);
-                              }}
-                            >
-                              ⛓ {seq.name}
-                            </button>
-                          ) : (
-                            <button
-                              key={seq.id}
-                              className="menu-item menu-seq menu-item-invalid"
-                              disabled
-                              title="Séquence invalide : une action ou séquence a été supprimée"
-                            >
-                              ⚠ {seq.name}
-                            </button>
-                          ),
-                        )}
-                      </div>
-                    )}
-                  </div>
-                );
-              })()}
-
-            <div className="menu-sep" />
-            <button
-              className="menu-item"
-              onClick={() => {
-                close();
-                onRefreshGit(project);
-              }}
-            >
-              ↻ Rafraîchir l'état git
-            </button>
+                            onDbConnect(project);
+                          }
+                        : undefined
+                    }
+                  >
+                    <span className="menu-item-ico-glyph"><DbIcon /></span>
+                    {dbConn
+                      ? dbConn.verified
+                        ? "Base de données"
+                        : "Base de données (non vérifiée)"
+                      : "Configurer la base de données"}
+                  </button>
+                )}
+                {/* Survol : déploie le menu d'actions complet en flyout latéral. */}
+                <button
+                  className={"menu-item menu-has-sub" + (actionsFlyout ? " active" : "")}
+                  onMouseEnter={openActionsFlyoutAt}
+                  onMouseLeave={scheduleCloseFlyout}
+                  onClick={openActionsFlyoutAt}
+                >
+                  <span className="menu-has-sub-label">Actions</span>
+                  <span className="menu-sub-caret">▸</span>
+                </button>
+              </div>
+            ) : (
+              renderActionGroups()
+            )}
           </div>
+
+          {hasFolded && actionsFlyout && (
+            <div
+              className="context-menu menu-flyout"
+              style={{
+                position: "fixed",
+                left: actionsFlyout.x,
+                top: actionsFlyout.y,
+                maxHeight: window.innerHeight - actionsFlyout.y - 8,
+                overflowY: "auto",
+              }}
+              onMouseEnter={cancelCloseFlyout}
+              onMouseLeave={scheduleCloseFlyout}
+              onContextMenu={(e) => e.preventDefault()}
+            >
+              {renderActionGroups()}
+            </div>
+          )}
 
           {openSub && (
             <div
