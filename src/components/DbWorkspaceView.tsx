@@ -22,12 +22,16 @@ export interface DbTabInfo {
 
 interface Props {
   state: DbWsState;
+  /** Réduit : masqué mais toujours monté (onglets et saisies préservés). */
+  hidden?: boolean;
   tabs: DbTabInfo[];
   activeId: string | null;
   onOpenTable: (table: string) => void;
   onSelectTab: (id: string) => void;
   onCloseTab: (id: string) => void;
   onRefreshTables: () => void;
+  /** Réduit l'espace sans rien perdre (le tableau de bord redevient accessible). */
+  onMinimize: () => void;
   onClose: () => void;
   /** true = l'onglet épinglé « Schéma » est affiché à la place d'une table. */
   graphOpen: boolean;
@@ -43,12 +47,14 @@ const DRIVER_LABEL: Record<DbDriver, string> = {
 
 export function DbWorkspaceView({
   state,
+  hidden,
   tabs,
   activeId,
   onOpenTable,
   onSelectTab,
   onCloseTab,
   onRefreshTables,
+  onMinimize,
   onClose,
   graphOpen,
   onOpenGraph,
@@ -63,7 +69,11 @@ export function DbWorkspaceView({
   const activeLabel = tabs.find((t) => t.id === activeId)?.label;
 
   return (
-    <div className="dbws-backdrop" onMouseDown={onClose}>
+    <div
+      className="dbws-backdrop"
+      style={hidden ? { display: "none" } : undefined}
+      onMouseDown={onMinimize}
+    >
       <div className="dbws" onMouseDown={(e) => e.stopPropagation()}>
         <div className="dbws-head">
           <div className="dbws-title">
@@ -72,9 +82,22 @@ export function DbWorkspaceView({
               {state.projectName} · {DRIVER_LABEL[state.driver]}
             </span>
           </div>
-          <button className="tab-close" onClick={onClose} title="Fermer">
-            ×
-          </button>
+          <div className="dbws-head-actions">
+            <button
+              className="dbws-head-btn"
+              onClick={onMinimize}
+              title="Réduire — garde les onglets et vos saisies, libère la console"
+            >
+              <span className="dbws-min-bar" />
+            </button>
+            <button
+              className="dbws-head-btn"
+              onClick={onClose}
+              title="Fermer et abandonner les onglets"
+            >
+              ×
+            </button>
+          </div>
         </div>
 
         <div className="dbws-body">

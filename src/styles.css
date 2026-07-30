@@ -1733,9 +1733,118 @@ button.db-table {
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
+.dbws-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.dbws-head-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 17px;
+  line-height: 1;
+  border-radius: 5px;
+}
+.dbws-head-btn:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
+/* Barre du bouton « Réduire » : alignée comme le × voisin. */
+.dbws-min-bar {
+  width: 11px;
+  height: 2px;
+  border-radius: 1px;
+  background: currentColor;
+}
 .dbws-title h3 {
   margin: 0 0 2px;
   font-size: 15px;
+}
+
+/* Barre des bases ouvertes (bas-droite) : une pastille par base. */
+.dbws-taskbar {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 175;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  max-width: min(70vw, 720px);
+}
+.dbws-pill {
+  display: flex;
+  align-items: stretch;
+  max-width: 260px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-2);
+  overflow: hidden;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+.dbws-pill:hover {
+  border-color: var(--accent);
+}
+.dbws-pill.on {
+  border-color: var(--accent);
+  background: rgba(79, 140, 255, 0.16);
+}
+.dbws-pill-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 6px 8px 14px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+.dbws-pill-close {
+  padding: 0 11px;
+  border: none;
+  border-left: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.dbws-pill-close:hover {
+  background: var(--red-bg);
+  color: var(--red);
+}
+.dbws-restore-ico {
+  font-size: 15px;
+  line-height: 1;
+}
+.dbws-restore-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.dbws-restore-badge {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--yellow);
+  color: #1a1200;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
 }
 .dbws-title .muted {
   font-size: 12px;
@@ -1875,6 +1984,95 @@ button.db-table {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  position: relative;
+}
+
+/* ---------------- Vue « fiche » (lignes transposées, en ligne) ---------------- */
+.dbdata-head-actions .btn.on {
+  border-color: var(--accent);
+  color: var(--accent-2);
+  background: rgba(79, 140, 255, 0.12);
+}
+.dbdata-detail-hint {
+  font-size: 11.5px;
+}
+/* Cellule éditable de la fiche : mêmes repères que le tableau. */
+.dbdata-detail-table td {
+  cursor: default;
+}
+.dbdata-detail-table td.dbdata-fk {
+  cursor: pointer;
+}
+.dbdata-detail-table td.dbdata-editing {
+  padding: 2px;
+  background: var(--bg-2);
+}
+.dbdata-detail-table td.dbdata-edited {
+  background: rgba(210, 153, 34, 0.18);
+  box-shadow: inset 0 0 0 1px var(--yellow);
+  color: var(--text);
+}
+/* Ligne (colonne de la fiche) marquée pour suppression. */
+.dbdata-detail-table td.dbdata-del-row,
+.dbdata-detail-table thead th.dbdata-del-row {
+  text-decoration: line-through;
+  color: var(--muted);
+  background: rgba(248, 81, 73, 0.12);
+}
+.dbdata-detail-table {
+  border-collapse: collapse;
+  /* Largeur au contenu : les colonnes ne sont plus écrasées, le corps défile
+     horizontalement quand il y a beaucoup de lignes sélectionnées. */
+  width: auto;
+  font-size: 12.5px;
+}
+.dbdata-detail-table th,
+.dbdata-detail-table td {
+  border: 1px solid var(--border-soft);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+/* Colonnes de valeurs : largeur minimale pour rester lisibles. */
+.dbdata-detail-table thead th:not(.dbdata-detail-colname),
+.dbdata-detail-table td:not(.dbdata-detail-colname) {
+  min-width: 150px;
+  max-width: 340px;
+}
+.dbdata-detail-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--panel-2);
+  color: var(--text-dim);
+  font-weight: 600;
+}
+.dbdata-detail-table td {
+  font-family: "Cascadia Code", "Consolas", monospace;
+}
+/* Colonne de gauche : noms de colonnes, figée à l'horizontale. */
+.dbdata-detail-colname {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--panel-2);
+  min-width: 160px;
+  max-width: 260px;
+}
+.dbdata-detail-table thead .dbdata-detail-colname {
+  z-index: 3;
+}
+.dbdata-detail-colname .dbdata-col-name {
+  display: block;
+  font-weight: 600;
+  color: var(--text);
+}
+.dbdata-detail-colname .dbdata-col-type {
+  display: block;
+  font-size: 11px;
+  color: var(--muted);
 }
 
 /* ---------------- Aperçu des données d'une table ---------------- */
@@ -1958,6 +2156,10 @@ button.db-table {
   overflow: auto;
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-sm);
+}
+/* Pendant un glisser de sélection : pas de sélection de texte parasite. */
+.dbdata-dragging {
+  user-select: none;
 }
 .dbdata-table {
   border-collapse: collapse;

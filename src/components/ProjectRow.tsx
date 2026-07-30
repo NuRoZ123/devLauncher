@@ -873,11 +873,7 @@ export const ProjectRow = memo(function ProjectRow({
               <PlayIcon />
             </button>
           )
-        ) : (
-          <span className="btn btn-sm btn-disabled" title="Librairie : pas de démarrage">
-            lib
-          </span>
-        )}
+        ) : null}
       </div>
 
       {repoMenu && repoLinks && (

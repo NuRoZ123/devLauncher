@@ -125,6 +125,18 @@ export function DbTableDataView({
   // Sélection de lignes (indices) + ancre pour la sélection Shift.
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [anchor, setAnchor] = useState<number | null>(null);
+  // Vue « fiche » : lignes sélectionnées affichées transposées (colonnes à
+  // gauche, une colonne par ligne). Ouverte avec Tab. `detailRows` fige les
+  // lignes montrées à l'ouverture : elles restent affichées même si la sélection
+  // change (ex. après avoir marqué une suppression).
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [detailRows, setDetailRows] = useState<number[]>([]);
+  const openDetail = () => {
+    const rows = [...selected].sort((a, b) => a - b);
+    if (rows.length === 0) return;
+    setDetailRows(rows);
+    setDetailOpen(true);
+  };
 
   // Modifications en attente (locales, non enregistrées) :
   //  - éditions de cellules : clé "r:c" → nouvelle valeur
@@ -159,6 +171,8 @@ export function DbTableDataView({
     setPendingDeletes(new Set());
     setPendingInserts([]);
     setEditing(null);
+    setDetailOpen(false);
+    setDetailRows([]);
     setSaveError(undefined);
   }, [state.loadId]);
 
@@ -181,7 +195,47 @@ export function DbTableDataView({
   const dirtyCount = editedCells + pendingDeletes.size + pendingInserts.length;
 
   // ----- Sélection -----
+  // Sélection au glisser : maintien du clic gauche puis survol des lignes.
+  const draggingRef = useRef(false);
+  const dragAnchorRef = useRef<number | null>(null);
+  const dragMovedRef = useRef(false);
+  const [dragging, setDragging] = useState(false);
+
+  const onRowMouseDown = (i: number, e: React.MouseEvent) => {
+    // Clic gauche simple uniquement : Ctrl/Cmd/Shift gardent la logique de clic.
+    if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    draggingRef.current = true;
+    dragAnchorRef.current = i;
+    dragMovedRef.current = false;
+    setDragging(true);
+  };
+  const onRowMouseEnter = (i: number) => {
+    if (!draggingRef.current || dragAnchorRef.current === null) return;
+    dragMovedRef.current = true;
+    const lo = Math.min(dragAnchorRef.current, i);
+    const hi = Math.max(dragAnchorRef.current, i);
+    const range = new Set<number>();
+    for (let k = lo; k <= hi; k++) range.add(k);
+    setSelected(range);
+    setAnchor(dragAnchorRef.current);
+  };
+  useEffect(() => {
+    const up = () => {
+      if (draggingRef.current) {
+        draggingRef.current = false;
+        setDragging(false);
+      }
+    };
+    document.addEventListener("mouseup", up);
+    return () => document.removeEventListener("mouseup", up);
+  }, []);
+
   const onRowClick = (i: number, e: React.MouseEvent) => {
+    // Après un vrai glisser, le clic final ne doit pas réduire à une seule ligne.
+    if (dragMovedRef.current) {
+      dragMovedRef.current = false;
+      return;
+    }
     if (e.shiftKey && anchor !== null) {
       const lo = Math.min(anchor, i);
       const hi = Math.max(anchor, i);
@@ -231,6 +285,25 @@ export function DbTableDataView({
     setSelected(new Set());
   };
 
+  // Suppression / restauration depuis la fiche : agit sur les lignes figées de
+  // la fiche, sans vider la sélection (la fiche reste ouverte et à jour).
+  const detailAllDeleted =
+    detailRows.length > 0 && detailRows.every((i) => pendingDeletes.has(i));
+  const markDeletedDetail = () => {
+    setPendingDeletes((prev) => {
+      const n = new Set(prev);
+      detailRows.forEach((i) => n.add(i));
+      return n;
+    });
+  };
+  const restoreDetail = () => {
+    setPendingDeletes((prev) => {
+      const n = new Set(prev);
+      detailRows.forEach((i) => n.delete(i));
+      return n;
+    });
+  };
+
   // Touche Suppr : marque la sélection pour suppression (= bouton Supprimer),
   // sauf pendant une édition ou si le focus est dans un champ de saisie.
   useEffect(() => {
@@ -252,6 +325,47 @@ export function DbTableDataView({
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [active, editing, selected]);
+
+  // Touche Tab : bascule la vue « fiche » (lignes sélectionnées transposées).
+  // Rouvrir la revient en tableau normal. Ignorée pendant une édition ou si le
+  // focus est dans un champ de saisie.
+  useEffect(() => {
+    if (!active) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Tab" || editing) return;
+      const t = e.target as HTMLElement | null;
+      if (
+        t &&
+        (t.tagName === "INPUT" ||
+          t.tagName === "SELECT" ||
+          t.tagName === "TEXTAREA" ||
+          t.isContentEditable)
+      )
+        return;
+      if (detailOpen) {
+        e.preventDefault();
+        setDetailOpen(false);
+        return;
+      }
+      if (selected.size === 0) return;
+      e.preventDefault();
+      openDetail();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [active, editing, detailOpen, selected]);
+
+  // Échap ferme la fiche en priorité (avant que l'overlay BDD ne se réduise).
+  useEffect(() => {
+    if (!detailOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      setDetailOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [detailOpen]);
 
   // ----- Édition locale -----
   const draftFor = (c: number, base: string | null | undefined) => {
@@ -536,9 +650,21 @@ export function DbTableDataView({
           </div>
           <div className="dbdata-head-actions">
             <button
+              className={"btn btn-ghost btn-sm" + (detailOpen ? " on" : "")}
+              onClick={() => (detailOpen ? setDetailOpen(false) : openDetail())}
+              disabled={state.loading || (!detailOpen && selected.size === 0)}
+              title={
+                detailOpen
+                  ? "Revenir à la grille en colonnes (Tab)"
+                  : "Afficher les lignes sélectionnées en fiche : colonnes à gauche (Tab)"
+              }
+            >
+              {detailOpen ? "▤ Colonnes" : "⇥ Fiche"}
+            </button>
+            <button
               className="btn btn-ghost btn-sm"
               onClick={addNewRow}
-              disabled={state.loading || saving || state.columns.length === 0}
+              disabled={state.loading || saving || state.columns.length === 0 || detailOpen}
               title="Ajouter une nouvelle ligne (en haut du tableau)"
             >
               ➕ Ligne
@@ -584,9 +710,112 @@ export function DbTableDataView({
             </div>
           ) : state.columns.length === 0 ? (
             !state.error && <div className="empty">Table sans colonne.</div>
+          ) : detailOpen && detailRows.length > 0 ? (
+            <div className="dbdata-scroll dbdata-record-scroll">
+              <table className="dbdata-detail-table">
+                <thead>
+                  <tr>
+                    <th className="dbdata-detail-colname">Colonne</th>
+                    {detailRows.map((ri) => (
+                      <th
+                        key={ri}
+                        className={pendingDeletes.has(ri) ? "dbdata-del-row" : undefined}
+                        title={
+                          pendingDeletes.has(ri)
+                            ? `Ligne ${ri + 1} — marquée pour suppression`
+                            : `Ligne ${ri + 1}`
+                        }
+                      >
+                        #{ri + 1}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {state.columns.map((col, ci) => (
+                    <tr key={ci}>
+                      <th
+                        className="dbdata-detail-colname"
+                        title={state.types[ci] ? `${col} · ${state.types[ci]}` : col}
+                      >
+                        <span className="dbdata-col-name">{col}</span>
+                        {state.types[ci] && (
+                          <span className="dbdata-col-type">{state.types[ci]}</span>
+                        )}
+                      </th>
+                      {detailRows.map((ri) => {
+                        const key = `${ri}:${ci}`;
+                        const deleted = pendingDeletes.has(ri);
+                        const isEditing =
+                          editing?.kind === "cell" && editing.r === ri && editing.c === ci;
+                        if (isEditing && !deleted) {
+                          return (
+                            <td key={ri} className="dbdata-editing">
+                              {renderEditor(ci)}
+                            </td>
+                          );
+                        }
+                        const edited = pendingEdits.has(key);
+                        const shown = edited ? pendingEdits.get(key)! : state.rows[ri]?.[ci];
+                        const fk = state.fks[ci];
+                        const canFollow = !!fk && shown !== null && shown !== "" && !deleted;
+                        return (
+                          <td
+                            key={ri}
+                            className={
+                              (edited ? "dbdata-edited " : "") +
+                              (deleted ? "dbdata-del-row " : "") +
+                              (canFollow ? "dbdata-fk" : "")
+                            }
+                            title={
+                              deleted
+                                ? "Ligne marquée pour suppression"
+                                : canFollow
+                                  ? `Ctrl+clic : ouvrir ${fk!.table} — double-clic pour modifier`
+                                  : "double-clic pour modifier"
+                            }
+                            onClick={(e) => {
+                              if (canFollow && (e.ctrlKey || e.metaKey)) {
+                                e.stopPropagation();
+                                followFk(ci, shown as string);
+                              }
+                            }}
+                            onDoubleClick={(e) => {
+                              if (deleted) return;
+                              e.stopPropagation();
+                              startEdit(ri, ci);
+                            }}
+                          >
+                            {shown === null || shown === undefined ? (
+                              <span className="dbdata-null">NULL</span>
+                            ) : shown === "" ? (
+                              <span className="dbdata-empty">∅</span>
+                            ) : (
+                              shown
+                            )}
+                            {canFollow && (
+                              <button
+                                className="dbdata-fk-btn"
+                                title={`Ouvrir ${fk!.table} où ${fk!.column} = ${shown}`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  followFk(ci, shown as string);
+                                }}
+                              >
+                                ↗
+                              </button>
+                            )}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           ) : (
             <div
-              className="dbdata-scroll"
+              className={"dbdata-scroll" + (dragging ? " dbdata-dragging" : "")}
               ref={scrollRef}
               onScroll={(e) => {
                 const el = e.currentTarget;
@@ -670,6 +899,8 @@ export function DbTableDataView({
                       <tr
                         key={ri}
                         className={cls.trim() || undefined}
+                        onMouseDown={(e) => onRowMouseDown(ri, e)}
+                        onMouseEnter={() => onRowMouseEnter(ri)}
                         onClick={(e) => onRowClick(ri, e)}
                       >
                         <td className="dbdata-rownum">{ri + 1}</td>
@@ -759,11 +990,40 @@ export function DbTableDataView({
 
         <div className="dbdata-foot">
           <div className="dbdata-foot-left">
-            {selected.size > 0 ? (
+            {detailOpen && detailRows.length > 0 ? (
+              <div className="dbdata-selbar">
+                <span className="dbdata-selcount">
+                  Fiche · {detailRows.length} ligne{detailRows.length > 1 ? "s" : ""}
+                </span>
+                {detailAllDeleted ? (
+                  <button className="btn btn-ghost btn-sm" onClick={restoreDetail}>
+                    ↺ Restaurer
+                  </button>
+                ) : (
+                  <button
+                    className="btn btn-stop btn-sm"
+                    onClick={markDeletedDetail}
+                    title="Marquer les lignes affichées pour suppression"
+                  >
+                    🗑 Supprimer
+                  </button>
+                )}
+                <span className="muted dbdata-detail-hint">
+                  double-clic pour modifier · Tab pour revenir aux colonnes
+                </span>
+              </div>
+            ) : selected.size > 0 ? (
               <div className="dbdata-selbar">
                 <span className="dbdata-selcount">
                   {selected.size} sélectionnée{selected.size > 1 ? "s" : ""}
                 </span>
+                <button
+                  className="btn btn-ghost btn-sm"
+                  onClick={openDetail}
+                  title="Afficher en fiche : colonnes à gauche, une colonne par ligne (Tab)"
+                >
+                  ⇥ Fiche
+                </button>
                 {allSelectedDeleted ? (
                   <button className="btn btn-ghost btn-sm" onClick={restoreSelected}>
                     ↺ Restaurer
@@ -843,6 +1103,7 @@ export function DbTableDataView({
             </div>
           </div>
         </div>
+
     </div>
   );
 }

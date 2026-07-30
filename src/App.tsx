@@ -58,6 +58,13 @@ type StepToken = { cancelled: boolean; runId: string };
 type StepPlan = { action: ActionDef; branch?: string };
 
 /** Sous-onglet d'une table : ses lignes, sa structure, ou ses relations. */
+const EMPTY_DB_GRAPH: DbGraphState = {
+  tables: [],
+  relations: [],
+  loading: false,
+  loaded: false,
+};
+
 type DbTabView = "data" | "schema" | "relations";
 
 /** Un onglet de table : ses données + son historique de navigation (FK). */
@@ -303,30 +310,63 @@ export default function App() {
   const [envModal, setEnvModal] = useState<EnvModalState | null>(null);
   const [dbModal, setDbModal] = useState<DbModalState | null>(null);
   const [dbTesting, setDbTesting] = useState<Set<string>>(new Set());
-  // Espace de travail BDD : liste des tables (à gauche) + onglets de tables.
-  const [dbWs, setDbWs] = useState<DbWsState | null>(null);
-  const dbWsRef = useRef<DbWsState | null>(null);
-  dbWsRef.current = dbWs;
+  // Espaces de travail BDD ouverts en parallèle, indexés par id de projet.
+  // Les onglets sont à plat (chaque onglet porte son projectId) et TOUS restent
+  // montés : basculer d'une base à l'autre ne perd donc aucune saisie en cours.
+  const [dbWsMap, setDbWsMap] = useState<Record<string, DbWsState>>({});
+  const dbWsMapRef = useRef<Record<string, DbWsState>>({});
+  dbWsMapRef.current = dbWsMap;
+  /** Base actuellement affichée (null = aucune / tableau de bord). */
+  const [activeDbId, setActiveDbId] = useState<string | null>(null);
+  const activeDbIdRef = useRef<string | null>(null);
+  activeDbIdRef.current = activeDbId;
+  // Réduit (masqué) mais toujours monté : rend le tableau de bord et sa console
+  // accessibles sans perdre les onglets ni les saisies en cours de la BDD.
+  const [dbWsHidden, setDbWsHidden] = useState(false);
   /** Colonnes déjà lues, par « projet:table » (listes déroulantes de structure). */
   const colCacheRef = useRef<Map<string, string[]>>(new Map());
-  /** Graphe des clés étrangères : chargé une fois, partagé par les deux vues
-   *  (relations d'une table et schéma général). */
-  const [dbGraph, setDbGraph] = useState<DbGraphState>({
-    tables: [],
-    relations: [],
-    loading: false,
-    loaded: false,
-  });
-  /** true = l'onglet « Schéma de la base » est affiché à la place des tables. */
-  const [dbGraphOpen, setDbGraphOpen] = useState(false);
+  /** Graphe des clés étrangères par base. */
+  const [dbGraphMap, setDbGraphMap] = useState<Record<string, DbGraphState>>({});
+  /** true = l'onglet « Schéma de la base » est affiché, par base. */
+  const [dbGraphOpenMap, setDbGraphOpenMap] = useState<Record<string, boolean>>({});
   const [dbTabs, setDbTabs] = useState<DbTab[]>([]);
   // Miroir de `dbTabs` : lit l'état courant hors du cycle de rendu (chargement
   // de la structure déclenché juste après un setDbTabs).
   const dbTabsRef = useRef<DbTab[]>([]);
   dbTabsRef.current = dbTabs;
-  const [dbActiveTab, setDbActiveTab] = useState<string | null>(null);
+  /** Onglet actif par base. */
+  const [dbActiveTabMap, setDbActiveTabMap] = useState<Record<string, string | null>>({});
   /** Modifications en attente par onglet (pastille sur l'onglet). */
   const [dbDirty, setDbDirty] = useState<Record<string, number>>({});
+
+  // ----- Espace actif dérivé + écritures ciblées -----
+  const dbWs = activeDbId ? dbWsMap[activeDbId] ?? null : null;
+  const dbGraph = (activeDbId ? dbGraphMap[activeDbId] : undefined) ?? EMPTY_DB_GRAPH;
+  const dbGraphOpen = activeDbId ? dbGraphOpenMap[activeDbId] ?? false : false;
+  const dbActiveTab = activeDbId ? dbActiveTabMap[activeDbId] ?? null : null;
+  /** Espace actif lu de façon synchrone (hors cycle de rendu). */
+  const activeWs = () =>
+    activeDbIdRef.current ? dbWsMapRef.current[activeDbIdRef.current] ?? null : null;
+  const patchWs = (pid: string, fn: (s: DbWsState) => DbWsState) =>
+    setDbWsMap((m) => (m[pid] ? { ...m, [pid]: fn(m[pid]) } : m));
+  const setDbGraph = (
+    updater: DbGraphState | ((g: DbGraphState) => DbGraphState),
+    pid = activeDbIdRef.current,
+  ) => {
+    if (!pid) return;
+    setDbGraphMap((m) => {
+      const cur = m[pid] ?? EMPTY_DB_GRAPH;
+      return { ...m, [pid]: typeof updater === "function" ? updater(cur) : updater };
+    });
+  };
+  const setDbGraphOpen = (v: boolean, pid = activeDbIdRef.current) => {
+    if (!pid) return;
+    setDbGraphOpenMap((m) => ({ ...m, [pid]: v }));
+  };
+  const setDbActiveTab = (id: string | null, pid = activeDbIdRef.current) => {
+    if (!pid) return;
+    setDbActiveTabMap((m) => ({ ...m, [pid]: id }));
+  };
   // Verrou synchrone : empêche plusieurs chargements de page concurrents
   // (les événements de scroll arrivent plus vite que la mise à jour d'état).
   const loadingMoreRef = useRef(false);
@@ -337,14 +377,50 @@ export default function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      if (dbWs) setDbWs(null);
+      // BDD ouverte et visible : Échap la réduit (conserve onglets + saisies).
+      if (dbWs && !dbWsHidden) setDbWsHidden(true);
       else if (jobsOpen) setJobsOpen(false);
       else if (view === "settings") setView("dashboard");
       else if (detailPath) setDetailPath(null);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [dbWs, jobsOpen, view, detailPath]);
+  }, [dbWs, dbWsHidden, jobsOpen, view, detailPath]);
+
+  // Repli copier/couper : dans la WebView, Ctrl/Cmd+C ne recopie pas toujours le
+  // contenu d'un champ. On force l'action via execCommand (idempotent : si la
+  // copie native fonctionne aussi, elle porte sur la même sélection).
+  useEffect(() => {
+    const onCopyKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      const k = e.key.toLowerCase();
+      if (k !== "c" && k !== "x") return;
+      const el = document.activeElement as HTMLElement | null;
+      const tag = el?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") {
+        const field = el as HTMLInputElement | HTMLTextAreaElement;
+        const { selectionStart: s, selectionEnd: en } = field;
+        if (s == null || en == null || s === en) return; // rien de sélectionné
+        try {
+          document.execCommand(k === "x" ? "cut" : "copy");
+        } catch {
+          /* ignore */
+        }
+      } else if (k === "c") {
+        // Hors champ : copier la sélection de texte (ex. sortie de console).
+        const sel = window.getSelection();
+        if (sel && sel.toString()) {
+          try {
+            document.execCommand("copy");
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    };
+    window.addEventListener("keydown", onCopyKey);
+    return () => window.removeEventListener("keydown", onCopyKey);
+  }, []);
 
   const bash = config?.git_bash_path ?? DEFAULT_GIT_BASH;
   const sources = config?.sources ?? NO_SOURCES;
@@ -1438,21 +1514,30 @@ export default function App() {
     async (p: Project) => {
       const conn = configRef.current?.db_connections?.[p.id];
       if (!conn) return;
-      setDbWs({
-        projectId: p.id,
-        projectName: p.name,
-        driver: conn.driver,
-        database: "",
-        tables: [],
-        loading: true,
-      });
-      setDbTabs([]);
-      setDbActiveTab(null);
-      setDbDirty({});
-      colCacheRef.current.clear();
-      setDbGraph({ tables: [], relations: [], loading: false, loaded: false });
-      setDbGraphOpen(false);
-      graphAskedRef.current = false;
+      // Espace déjà ouvert pour ce projet : on l'active simplement au lieu de
+      // tout reconstruire — les onglets et saisies en cours sont préservés.
+      if (dbWsMapRef.current[p.id]) {
+        setActiveDbId(p.id);
+        setDbWsHidden(false);
+        return;
+      }
+      setActiveDbId(p.id);
+      setDbWsHidden(false);
+      setDbWsMap((m) => ({
+        ...m,
+        [p.id]: {
+          projectId: p.id,
+          projectName: p.name,
+          driver: conn.driver,
+          database: "",
+          tables: [],
+          loading: true,
+        },
+      }));
+      setDbActiveTabMap((m) => ({ ...m, [p.id]: null }));
+      setDbGraphMap((m) => ({ ...m, [p.id]: EMPTY_DB_GRAPH }));
+      setDbGraphOpenMap((m) => ({ ...m, [p.id]: false }));
+      graphAskedRef.current.delete(p.id);
       const content = await api.readEnv(p.path).catch(() => "");
       const v = resolveDbValues(conn, parseEnv(content));
       // Diagnostic : trace la cible réellement résolue (clé base → valeur), pour
@@ -1463,8 +1548,7 @@ export default function App() {
           `[base via ${conn.databaseKey || "?"}]`,
         "sys",
       );
-      const patch = (fn: (s: DbWsState) => DbWsState) =>
-        setDbWs((s) => (s && s.projectId === p.id ? fn(s) : s));
+      const patch = (fn: (s: DbWsState) => DbWsState) => patchWs(p.id, fn);
       if (!v.portValid) {
         patch((s) => ({ ...s, loading: false, error: `Port invalide : « ${v.portRaw} »` }));
         await saveDbConn(p.id, conn, false);
@@ -1491,25 +1575,26 @@ export default function App() {
 
   /** Recharge la liste des tables sans toucher aux onglets ouverts. */
   const refreshWsTables = useCallback(async () => {
-    const ws = dbWs;
+    const ws = activeWs();
     if (!ws) return;
-    const conn = configRef.current?.db_connections?.[ws.projectId];
-    const p = projects.find((x) => x.id === ws.projectId);
+    const pid = ws.projectId;
+    const conn = configRef.current?.db_connections?.[pid];
+    const p = projects.find((x) => x.id === pid);
     if (!conn || !p) return;
-    setDbWs((s) => (s ? { ...s, loading: true, error: undefined } : s));
+    patchWs(pid, (s) => ({ ...s, loading: true, error: undefined }));
     const content = await api.readEnv(p.path).catch(() => "");
     const v = resolveDbValues(conn, parseEnv(content));
     if (!v.portValid) {
-      setDbWs((s) => (s ? { ...s, loading: false, error: `Port invalide : « ${v.portRaw} »` } : s));
+      patchWs(pid, (s) => ({ ...s, loading: false, error: `Port invalide : « ${v.portRaw} »` }));
       return;
     }
     try {
       const tables = await api.dbTables(conn.driver, v.host, v.port, v.user, v.password, v.database);
-      setDbWs((s) => (s ? { ...s, database: v.database, tables, loading: false } : s));
+      patchWs(pid, (s) => ({ ...s, database: v.database, tables, loading: false }));
     } catch (e) {
-      setDbWs((s) => (s ? { ...s, loading: false, error: String(e) } : s));
+      patchWs(pid, (s) => ({ ...s, loading: false, error: String(e) }));
     }
-  }, [dbWs, projects]);
+  }, [projects]);
 
   /** Charge (ou recharge) un onglet : page 0, avec limite et filtre donnés. */
   const loadTab = useCallback(
@@ -1603,7 +1688,9 @@ export default function App() {
       if (!ws) return;
       // Ouvrir une table quitte le schéma général (clic sur une boîte).
       setDbGraphOpen(false);
-      const existing = dbTabs.find((t) => t.data.table === table);
+      const existing = dbTabs.find(
+        (t) => t.data.projectId === ws.projectId && t.data.table === table,
+      );
       if (existing) {
         setDbActiveTab(existing.id);
         return;
@@ -1687,20 +1774,17 @@ export default function App() {
   /** Charge le graphe des clés étrangères de la base (une seule lecture, quel
    *  que soit le nombre de vues qui l'affichent). */
   const loadDbGraph = useCallback(async () => {
-    const ws = dbWsRef.current;
+    const ws = activeWs();
     if (!ws) return;
-    const conn = configRef.current?.db_connections?.[ws.projectId];
-    const p = projects.find((x) => x.id === ws.projectId);
+    const pid = ws.projectId;
+    const conn = configRef.current?.db_connections?.[pid];
+    const p = projects.find((x) => x.id === pid);
     if (!conn || !p) return;
-    setDbGraph((g) => ({ ...g, loading: true, error: undefined }));
+    setDbGraph((g) => ({ ...g, loading: true, error: undefined }), pid);
     const content = await api.readEnv(p.path).catch(() => "");
     const v = resolveDbValues(conn, parseEnv(content));
     if (!v.portValid) {
-      setDbGraph((g) => ({
-        ...g,
-        loading: false,
-        error: `Port invalide : « ${v.portRaw} »`,
-      }));
+      setDbGraph((g) => ({ ...g, loading: false, error: `Port invalide : « ${v.portRaw} »` }), pid);
       return;
     }
     try {
@@ -1712,9 +1796,9 @@ export default function App() {
         v.password,
         v.database,
       );
-      setDbGraph({ ...data, loading: false, loaded: true });
+      setDbGraph({ ...data, loading: false, loaded: true }, pid);
     } catch (e) {
-      setDbGraph((g) => ({ ...g, loading: false, error: String(e) }));
+      setDbGraph((g) => ({ ...g, loading: false, error: String(e) }), pid);
     }
   }, [projects]);
 
@@ -1733,10 +1817,11 @@ export default function App() {
 
   /** Charge le graphe à la première demande seulement (le ref évite un second
    *  chargement lorsque plusieurs vues s'affichent dans le même rendu). */
-  const graphAskedRef = useRef(false);
+  const graphAskedRef = useRef<Set<string>>(new Set());
   const ensureDbGraph = useCallback(() => {
-    if (graphAskedRef.current) return;
-    graphAskedRef.current = true;
+    const pid = activeDbIdRef.current;
+    if (!pid || graphAskedRef.current.has(pid)) return;
+    graphAskedRef.current.add(pid);
     void loadDbGraph();
   }, [loadDbGraph]);
 
@@ -1744,7 +1829,7 @@ export default function App() {
    *  Mémorisées par « projet:table » et vidées au changement d'espace de travail. */
   const loadTableColumns = useCallback(
     async (target: string): Promise<string[]> => {
-      const ws = dbWsRef.current;
+      const ws = activeWs();
       if (!ws) return [];
       const cacheKey = `${ws.projectId}:${target}`;
       const hit = colCacheRef.current.get(cacheKey);
@@ -1803,10 +1888,12 @@ export default function App() {
         const summary = `${res.added} ajoutée(s), ${res.modified} modifiée(s), ${res.dropped} supprimée(s)`;
         pushLocal(projectId, `🧬 ${table} : ${summary}`, "sys");
         for (const s of res.statements) pushLocal(projectId, `   ${s}`, "sys");
-        // Les colonnes ont changé : le cache des listes déroulantes est périmé.
-        colCacheRef.current.clear();
+        // Les colonnes ont changé : le cache des listes déroulantes (de cette
+        // base) est périmé.
+        for (const k of [...colCacheRef.current.keys()])
+          if (k.startsWith(`${projectId}:`)) colCacheRef.current.delete(k);
         // Une contrainte a pu créer ou supprimer une clé étrangère.
-        if (graphAskedRef.current) void loadDbGraph();
+        if (graphAskedRef.current.has(projectId)) void loadDbGraph();
         // Les colonnes ont changé : structure *et* données doivent être relues.
         await loadTabSchema(tabId);
         void loadTab(tabId, projectId, table, limit, filter);
@@ -1838,11 +1925,15 @@ export default function App() {
 
   const closeDbTab = useCallback(
     (id: string) => {
-      const idx = dbTabs.findIndex((t) => t.id === id);
-      const next = dbTabs.filter((t) => t.id !== id);
-      setDbTabs(next);
-      if (dbActiveTab === id) {
-        setDbActiveTab(next[Math.min(idx, next.length - 1)]?.id ?? null);
+      const tab = dbTabs.find((t) => t.id === id);
+      const pid = tab?.data.projectId;
+      // Onglet suivant choisi parmi ceux de la MÊME base.
+      const sameProject = dbTabs.filter((t) => t.data.projectId === pid);
+      const idx = sameProject.findIndex((t) => t.id === id);
+      const remaining = sameProject.filter((t) => t.id !== id);
+      setDbTabs((ts) => ts.filter((t) => t.id !== id));
+      if (pid && dbActiveTabMap[pid] === id) {
+        setDbActiveTab(remaining[Math.min(idx, remaining.length - 1)]?.id ?? null, pid);
       }
       setDbDirty((d) => {
         const n = { ...d };
@@ -1850,8 +1941,55 @@ export default function App() {
         return n;
       });
     },
-    [dbTabs, dbActiveTab],
+    [dbTabs, dbActiveTabMap],
   );
+
+  /** Active (affiche) une base déjà ouverte. */
+  const focusDbWorkspace = useCallback((pid: string) => {
+    setActiveDbId(pid);
+    setDbWsHidden(false);
+  }, []);
+
+  /** Ferme entièrement une base (onglets + état) ; active une autre s'il reste. */
+  const closeDbWorkspace = useCallback((pid: string) => {
+    const closedIds = new Set(
+      dbTabsRef.current.filter((t) => t.data.projectId === pid).map((t) => t.id),
+    );
+    setDbTabs((ts) => ts.filter((t) => t.data.projectId !== pid));
+    setDbDirty((d) => {
+      const n = { ...d };
+      for (const k of Object.keys(n)) if (closedIds.has(k)) delete n[k];
+      return n;
+    });
+    setDbWsMap((m) => {
+      const n = { ...m };
+      delete n[pid];
+      return n;
+    });
+    setDbActiveTabMap((m) => {
+      const n = { ...m };
+      delete n[pid];
+      return n;
+    });
+    setDbGraphMap((m) => {
+      const n = { ...m };
+      delete n[pid];
+      return n;
+    });
+    setDbGraphOpenMap((m) => {
+      const n = { ...m };
+      delete n[pid];
+      return n;
+    });
+    graphAskedRef.current.delete(pid);
+    for (const k of [...colCacheRef.current.keys()])
+      if (k.startsWith(`${pid}:`)) colCacheRef.current.delete(k);
+    setActiveDbId((cur) => {
+      if (cur !== pid) return cur;
+      const rest = Object.keys(dbWsMapRef.current).filter((x) => x !== pid);
+      return rest[0] ?? null;
+    });
+  }, []);
 
   /** Scroll infini : ajoute la page suivante (OFFSET) aux lignes de l'onglet. */
   const loadMoreTab = useCallback(
@@ -2645,129 +2783,186 @@ export default function App() {
         />
       )}
 
-      {dbWs && (
-        <DbWorkspaceView
-          state={dbWs}
-          tabs={dbTabs.map((t) => ({
-            id: t.id,
-            label: t.data.table,
-            dirty: dbDirty[t.id] ?? 0,
-          }))}
-          activeId={dbGraphOpen ? null : dbActiveTab}
-          graphOpen={dbGraphOpen}
-          onOpenGraph={() => {
-            setDbGraphOpen(true);
-            ensureDbGraph();
-          }}
-          onOpenTable={openTableTab}
-          onSelectTab={(id) => {
-            setDbGraphOpen(false);
-            setDbActiveTab(id);
-          }}
-          onCloseTab={closeDbTab}
-          onRefreshTables={refreshWsTables}
-          onClose={() => setDbWs(null)}
-        >
-          {/* Tous les onglets restent montés (état local préservé) ; seul
-              l'onglet actif est visible. */}
-          {dbTabs.map((t) => (
-            <div
-              key={t.id}
-              className="dbws-tabpanel"
-              style={{ display: t.id === dbActiveTab && !dbGraphOpen ? "flex" : "none" }}
-            >
-              <div className="dbsub-tabs">
-                <button
-                  className={"dbsub-tab" + (t.view === "data" ? " on" : "")}
-                  onClick={() => setTabView(t.id, "data")}
-                  title="Lignes de la table"
-                >
-                  ▤ Données
-                </button>
-                <button
-                  className={"dbsub-tab" + (t.view === "schema" ? " on" : "")}
-                  onClick={() => setTabView(t.id, "schema")}
-                  title="Colonnes, types, contraintes et index"
-                >
-                  🧬 Structure
-                </button>
-                <button
-                  className={"dbsub-tab" + (t.view === "relations" ? " on" : "")}
-                  onClick={() => setTabView(t.id, "relations")}
-                  title="Schéma des tables liées par clé étrangère"
-                >
-                  🔗 Relations
-                </button>
-              </div>
-              {/* Les deux vues restent montées : les modifications en attente du
-                  tableau survivent au passage par la structure. */}
-              <div
-                className="dbsub-panel"
-                style={{ display: t.view === "data" ? "flex" : "none" }}
-              >
-                <DbTableDataView
-                  state={t.data}
-                  active={!dbGraphOpen && t.id === dbActiveTab && t.view === "data"}
-                  onLimitChange={(n) => changeTabLimit(t.id, n)}
-                  onFilterChange={(f) => changeTabFilter(t.id, f)}
-                  onRefresh={() => refreshTab(t.id)}
-                  onApply={(ins, upd, del) => applyTabChanges(t.id, ins, upd, del)}
-                  onLoadMore={() => loadMoreTab(t.id)}
-                  onNavigateFk={(table, filter, scrollTop) =>
-                    navigateTabFk(t.id, table, filter, scrollTop)
-                  }
-                  onBack={() => goBackTab(t.id)}
-                  canBack={t.navStack.length > 0}
-                  onDirtyChange={(n) =>
-                    setDbDirty((d) => (d[t.id] === n ? d : { ...d, [t.id]: n }))
-                  }
-                />
-              </div>
-              <div
-                className="dbsub-panel"
-                style={{ display: t.view === "schema" ? "flex" : "none" }}
-              >
-                <DbTableSchemaView
-                  table={t.data.table}
-                  state={t.schema}
-                  active={!dbGraphOpen && t.id === dbActiveTab && t.view === "schema"}
-                  driver={dbWs.driver}
-                  tables={dbWs.tables}
-                  onLoadColumns={loadTableColumns}
-                  onRefresh={() => loadTabSchema(t.id)}
-                  onOpenTable={openTableTab}
-                  onApply={(changes) => applyTabSchema(t.id, changes)}
-                />
-              </div>
-              <div
-                className="dbsub-panel"
-                style={{ display: t.view === "relations" ? "flex" : "none" }}
-              >
-                <DbRelationsView
-                  state={dbGraph}
-                  focus={t.data.table}
-                  onRefresh={loadDbGraph}
-                  onOpenTable={openTableTab}
-                />
-              </div>
-            </div>
-          ))}
-          {/* Schéma général : monté avec les onglets, visible seul quand actif. */}
-          <div
-            className="dbws-tabpanel"
-            style={{ display: dbGraphOpen ? "flex" : "none" }}
+      {/* Chaque base ouverte a son propre espace, tous montés en permanence :
+          basculer de l'une à l'autre ne perd aucune saisie. Seule la base active
+          et non réduite est visible. */}
+      {Object.values(dbWsMap).map((ws) => {
+        const pid = ws.projectId;
+        const wsTabs = dbTabs.filter((t) => t.data.projectId === pid);
+        const graphThis = dbGraphMap[pid] ?? EMPTY_DB_GRAPH;
+        const graphOpenThis = dbGraphOpenMap[pid] ?? false;
+        const activeTabThis = dbActiveTabMap[pid] ?? null;
+        const visible = pid === activeDbId && !dbWsHidden;
+        return (
+          <DbWorkspaceView
+            key={pid}
+            state={ws}
+            hidden={!visible}
+            tabs={wsTabs.map((t) => ({
+              id: t.id,
+              label: t.data.table,
+              dirty: dbDirty[t.id] ?? 0,
+            }))}
+            activeId={graphOpenThis ? null : activeTabThis}
+            graphOpen={graphOpenThis}
+            onOpenGraph={() => {
+              setDbGraphOpen(true, pid);
+              ensureDbGraph();
+            }}
+            onOpenTable={openTableTab}
+            onSelectTab={(id) => {
+              setDbGraphOpen(false, pid);
+              setDbActiveTab(id, pid);
+            }}
+            onCloseTab={closeDbTab}
+            onRefreshTables={refreshWsTables}
+            onMinimize={() => setDbWsHidden(true)}
+            onClose={() => closeDbWorkspace(pid)}
           >
-            <DbRelationsView
-              state={dbGraph}
-              active={dbGraphOpen}
-              savedLayout={config?.db_layouts?.[dbWs.projectId] ?? null}
-              onSaveLayout={(layout) => saveGraphLayout(dbWs.projectId, layout)}
-              onRefresh={loadDbGraph}
-              onOpenTable={openTableTab}
-            />
+            {/* Tous les onglets restent montés (état local préservé) ; seul
+                l'onglet actif est visible. */}
+            {wsTabs.map((t) => (
+              <div
+                key={t.id}
+                className="dbws-tabpanel"
+                style={{ display: t.id === activeTabThis && !graphOpenThis ? "flex" : "none" }}
+              >
+                <div className="dbsub-tabs">
+                  <button
+                    className={"dbsub-tab" + (t.view === "data" ? " on" : "")}
+                    onClick={() => setTabView(t.id, "data")}
+                    title="Lignes de la table"
+                  >
+                    ▤ Données
+                  </button>
+                  <button
+                    className={"dbsub-tab" + (t.view === "schema" ? " on" : "")}
+                    onClick={() => setTabView(t.id, "schema")}
+                    title="Colonnes, types, contraintes et index"
+                  >
+                    🧬 Structure
+                  </button>
+                  <button
+                    className={"dbsub-tab" + (t.view === "relations" ? " on" : "")}
+                    onClick={() => setTabView(t.id, "relations")}
+                    title="Schéma des tables liées par clé étrangère"
+                  >
+                    🔗 Relations
+                  </button>
+                </div>
+                {/* Les deux vues restent montées : les modifications en attente du
+                    tableau survivent au passage par la structure. */}
+                <div
+                  className="dbsub-panel"
+                  style={{ display: t.view === "data" ? "flex" : "none" }}
+                >
+                  <DbTableDataView
+                    state={t.data}
+                    active={visible && !graphOpenThis && t.id === activeTabThis && t.view === "data"}
+                    onLimitChange={(n) => changeTabLimit(t.id, n)}
+                    onFilterChange={(f) => changeTabFilter(t.id, f)}
+                    onRefresh={() => refreshTab(t.id)}
+                    onApply={(ins, upd, del) => applyTabChanges(t.id, ins, upd, del)}
+                    onLoadMore={() => loadMoreTab(t.id)}
+                    onNavigateFk={(table, filter, scrollTop) =>
+                      navigateTabFk(t.id, table, filter, scrollTop)
+                    }
+                    onBack={() => goBackTab(t.id)}
+                    canBack={t.navStack.length > 0}
+                    onDirtyChange={(n) =>
+                      setDbDirty((d) => (d[t.id] === n ? d : { ...d, [t.id]: n }))
+                    }
+                  />
+                </div>
+                <div
+                  className="dbsub-panel"
+                  style={{ display: t.view === "schema" ? "flex" : "none" }}
+                >
+                  <DbTableSchemaView
+                    table={t.data.table}
+                    state={t.schema}
+                    active={visible && !graphOpenThis && t.id === activeTabThis && t.view === "schema"}
+                    driver={ws.driver}
+                    tables={ws.tables}
+                    onLoadColumns={loadTableColumns}
+                    onRefresh={() => loadTabSchema(t.id)}
+                    onOpenTable={openTableTab}
+                    onApply={(changes) => applyTabSchema(t.id, changes)}
+                  />
+                </div>
+                <div
+                  className="dbsub-panel"
+                  style={{ display: t.view === "relations" ? "flex" : "none" }}
+                >
+                  <DbRelationsView
+                    state={graphThis}
+                    focus={t.data.table}
+                    onRefresh={loadDbGraph}
+                    onOpenTable={openTableTab}
+                  />
+                </div>
+              </div>
+            ))}
+            {/* Schéma général : monté avec les onglets, visible seul quand actif. */}
+            <div
+              className="dbws-tabpanel"
+              style={{ display: graphOpenThis ? "flex" : "none" }}
+            >
+              <DbRelationsView
+                state={graphThis}
+                active={graphOpenThis && visible}
+                savedLayout={config?.db_layouts?.[pid] ?? null}
+                onSaveLayout={(layout) => saveGraphLayout(pid, layout)}
+                onRefresh={loadDbGraph}
+                onOpenTable={openTableTab}
+              />
+            </div>
+          </DbWorkspaceView>
+        );
+      })}
+
+      {/* Barre des bases ouvertes (bas-droite) : bascule + fermeture. */}
+      {Object.keys(dbWsMap).length > 0 &&
+        (dbWsHidden || Object.keys(dbWsMap).length > 1) && (
+          <div className="dbws-taskbar">
+            {Object.values(dbWsMap).map((ws) => {
+              const pid = ws.projectId;
+              const total = dbTabs
+                .filter((t) => t.data.projectId === pid)
+                .reduce((a, t) => a + (dbDirty[t.id] ?? 0), 0);
+              const current = pid === activeDbId && !dbWsHidden;
+              return (
+                <div key={pid} className={"dbws-pill" + (current ? " on" : "")}>
+                  <button
+                    className="dbws-pill-main"
+                    onClick={() => focusDbWorkspace(pid)}
+                    title="Afficher cette base (vos saisies sont conservées)"
+                  >
+                    <span className="dbws-restore-ico">🗄</span>
+                    <span className="dbws-restore-label">
+                      {ws.database || ws.projectName}
+                    </span>
+                    {total > 0 && (
+                      <span
+                        className="dbws-restore-badge"
+                        title={`${total} modification(s) non enregistrée(s)`}
+                      >
+                        {total}
+                      </span>
+                    )}
+                  </button>
+                  <button
+                    className="dbws-pill-close"
+                    onClick={() => closeDbWorkspace(pid)}
+                    title="Fermer cette base"
+                  >
+                    ×
+                  </button>
+                </div>
+              );
+            })}
           </div>
-        </DbWorkspaceView>
-      )}
+        )}
 
       {cmdModal && (
         <StartCommandModal
