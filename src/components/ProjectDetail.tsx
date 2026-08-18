@@ -7,6 +7,7 @@ const KIND_LABEL: Record<ProjectKind, string> = {
   service: "Service",
   front: "Front",
   package: "Package",
+  fullstack: "Full-stack",
 };
 
 interface Props {

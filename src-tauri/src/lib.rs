@@ -262,13 +262,21 @@ struct Config {
     /// Rust (round-trip JSON), interprétée par l'interface.
     #[serde(default)]
     db_layouts: HashMap<String, serde_json::Value>,
+    /// Dossiers virtuels d'organisation du tableau de bord (avec leurs membres).
+    /// Opaque côté Rust (round-trip JSON), interprété par l'interface.
+    #[serde(default)]
+    folders: Vec<serde_json::Value>,
+    /// Ordre des entrées à la racine du tableau de bord : id de projet « libre »
+    /// ou "folder:<id>". Opaque côté Rust, interprété par l'interface.
+    #[serde(default)]
+    project_layout: Vec<String>,
 }
 
 #[derive(Serialize)]
 struct Project {
     id: String,
     name: String,
-    kind: String, // "service" | "package" | "front"
+    kind: String, // "service" | "package" | "front" | "fullstack"
     path: String,
     start_command: Option<String>,
     has_startup: bool,
@@ -277,6 +285,10 @@ struct Project {
     port: Option<u16>,
     /// Noms des scripts définis dans le package.json (dans l'ordre du fichier).
     scripts: Vec<String>,
+    /// (fullstack) Sous-projets regroupés : commun (optionnel), back, front.
+    /// Omis du JSON pour les projets classiques (interprété `undefined` côté TS).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    children: Vec<Project>,
 }
 
 #[derive(Serialize)]
@@ -295,6 +307,20 @@ struct BranchInfo {
     /// true = branche présente uniquement sur le remote (aucune copie locale),
     /// c.-à-d. une branche « stale » à afficher avec un badge.
     remote: bool,
+}
+
+#[derive(Serialize)]
+struct GitChange {
+    /// Chemin du fichier relatif à la racine du dépôt (chemin cible d'un renommage).
+    path: String,
+    /// Ancien chemin en cas de renommage/copie (None sinon).
+    orig: Option<String>,
+    /// Code de statut à afficher : "M" | "A" | "D" | "R" | "?" (non suivi).
+    status: String,
+    /// true = présent dans l'index git (sera pris par le prochain commit).
+    staged: bool,
+    /// true = fichier non suivi par git (nouveau).
+    untracked: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -461,6 +487,50 @@ fn run_capture(bash: &str, cwd: &str, script: &str) -> Result<String, String> {
         .output()
         .map_err(|e| e.to_string())?;
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// Échappe une chaîne pour l'insérer telle quelle dans un script bash
+/// (single-quotes : neutralise tout métacaractère, espaces et sauts de ligne
+/// compris). Sert à passer des chemins ou un message de commit sans risque.
+fn sh_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Lance un script git et renvoie stdout + stderr fusionnés. Contrairement à
+/// `run_capture`, remonte une `Err` si le code de sortie est non nul (commit
+/// sans rien à valider, push rejeté…) afin que l'interface affiche l'erreur.
+fn run_git(bash: &str, cwd: &str, script: &str) -> Result<String, String> {
+    let out = make_bash(bash, cwd, script)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| e.to_string())?;
+    let mut s = String::from_utf8_lossy(&out.stdout).into_owned();
+    let err = String::from_utf8_lossy(&out.stderr);
+    if !err.trim().is_empty() {
+        if !s.trim().is_empty() {
+            s.push('\n');
+        }
+        s.push_str(&err);
+    }
+    let s = s.trim().to_string();
+    if out.status.success() {
+        Ok(s)
+    } else if s.is_empty() {
+        Err("Échec de la commande git.".to_string())
+    } else {
+        Err(s)
+    }
 }
 
 /// Tue le(s) process qui écoute(nt) sur ce port (le node détaché, typiquement),
@@ -936,28 +1006,36 @@ struct ProjectSource {
     /// (parent) Type précis, ou "ignored", par nom de sous-dossier.
     #[serde(default)]
     overrides: HashMap<String, String>,
+    /// (single, type "fullstack") Nom du sous-dossier back, sinon auto-détecté.
+    #[serde(default, rename = "backDir")]
+    back_dir: Option<String>,
+    /// (single, type "fullstack") Nom du sous-dossier front, sinon auto-détecté.
+    #[serde(default, rename = "frontDir")]
+    front_dir: Option<String>,
 }
 
-/// Construit un `Project` à partir d'un dossier et de son type, et l'ajoute à
-/// `out`. Généralise l'ancien `scan_dir` (un seul projet, tout type).
-fn push_project(
+/// Noms de sous-dossiers essayés (dans l'ordre) pour auto-détecter le back et le
+/// front d'un projet fullstack, quand la source ne les fixe pas explicitement.
+const BACK_DIR_NAMES: &[&str] = &["back", "backend", "api", "server", "serveur"];
+const FRONT_DIR_NAMES: &[&str] = &["front", "frontend", "web", "client", "app"];
+
+/// Construit un `Project` pour un dossier donné, avec un id et un nom d'affichage
+/// explicites. Renvoie `None` si le dossier n'existe pas. Cœur partagé par
+/// `push_project` (projets classiques) et `push_fullstack` (sous-projets).
+fn build_project(
     path: &Path,
     kind: &str,
+    id: String,
+    name: String,
     start_cmd: &str,
     overrides: &HashMap<String, String>,
-    out: &mut Vec<Project>,
-) {
+) -> Option<Project> {
     if !path.is_dir() {
-        return; // dossier absent (source obsolète) : ignoré silencieusement
+        return None; // dossier absent (source obsolète) : ignoré silencieusement
     }
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
     let has_startup = path.join("startup.sh").is_file();
     let has_pkg = path.join("package.json").is_file();
     let has_env = path.join(".env").is_file();
-    let id = format!("{}:{}", kind, name);
     // Commande de démarrage : l'exception du projet si elle existe, sinon la
     // commande par défaut définie par l'utilisateur (config).
     let cmd = overrides.get(&id).map(String::as_str).unwrap_or(start_cmd);
@@ -978,7 +1056,7 @@ fn push_project(
         _ => None,
     };
     let scripts = if has_pkg { read_scripts(path) } else { Vec::new() };
-    out.push(Project {
+    Some(Project {
         id,
         name,
         kind: kind.to_string(),
@@ -989,6 +1067,125 @@ fn push_project(
         has_env,
         port,
         scripts,
+        children: Vec::new(),
+    })
+}
+
+/// Construit un `Project` à partir d'un dossier et de son type, et l'ajoute à
+/// `out`. Généralise l'ancien `scan_dir` (un seul projet, tout type). Un type
+/// `fullstack` est délégué à `push_fullstack`.
+fn push_project(
+    path: &Path,
+    kind: &str,
+    start_cmd: &str,
+    overrides: &HashMap<String, String>,
+    out: &mut Vec<Project>,
+) {
+    if kind == "fullstack" {
+        push_fullstack(path, None, None, start_cmd, overrides, out);
+        return;
+    }
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let id = format!("{}:{}", kind, name);
+    if let Some(p) = build_project(path, kind, id, name, start_cmd, overrides) {
+        out.push(p);
+    }
+}
+
+/// Cherche un sous-dossier de `root` : d'abord le nom forcé `forced` (s'il est
+/// fourni et existe), sinon la 1re correspondance parmi `candidates`.
+fn find_subdir(root: &Path, forced: Option<&str>, candidates: &[&str]) -> Option<String> {
+    if let Some(name) = forced {
+        let name = name.trim();
+        if !name.is_empty() && root.join(name).is_dir() {
+            return Some(name.to_string());
+        }
+    }
+    candidates
+        .iter()
+        .find(|n| root.join(n).is_dir())
+        .map(|n| n.to_string())
+}
+
+/// Construit un projet `fullstack` : un parent (structurel, non démarrable)
+/// portant ses sous-projets — commun (package racine, si `package.json`), back
+/// (service) et front. `back_dir`/`front_dir` forcent le nom des sous-dossiers ;
+/// sinon ils sont auto-détectés (BACK_DIR_NAMES / FRONT_DIR_NAMES).
+fn push_fullstack(
+    root: &Path,
+    back_dir: Option<&str>,
+    front_dir: Option<&str>,
+    start_cmd: &str,
+    overrides: &HashMap<String, String>,
+    out: &mut Vec<Project>,
+) {
+    if !root.is_dir() {
+        return;
+    }
+    let name = root
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let prefix = format!("fullstack:{}", name);
+    let mut children: Vec<Project> = Vec::new();
+
+    // Commun : package.json à la racine du dossier projet (sinon pas de sous-ligne).
+    if root.join("package.json").is_file() {
+        if let Some(p) = build_project(
+            root,
+            "package",
+            format!("{}:common", prefix),
+            "commun".to_string(),
+            start_cmd,
+            overrides,
+        ) {
+            children.push(p);
+        }
+    }
+    // Back → service, dans son sous-dossier.
+    if let Some(dir) = find_subdir(root, back_dir, BACK_DIR_NAMES) {
+        if let Some(p) = build_project(
+            &root.join(&dir),
+            "service",
+            format!("{}:back", prefix),
+            dir,
+            start_cmd,
+            overrides,
+        ) {
+            children.push(p);
+        }
+    }
+    // Front → front, dans son sous-dossier.
+    if let Some(dir) = find_subdir(root, front_dir, FRONT_DIR_NAMES) {
+        if let Some(p) = build_project(
+            &root.join(&dir),
+            "front",
+            format!("{}:front", prefix),
+            dir,
+            start_cmd,
+            overrides,
+        ) {
+            children.push(p);
+        }
+    }
+
+    // Parent : purement structurel (dépliage). Git/dépôt sont gérés à son niveau
+    // (dépôt partagé) ; il n'est pas démarrable et n'a ni scripts ni .env propres.
+    out.push(Project {
+        id: prefix,
+        name,
+        kind: "fullstack".to_string(),
+        path: root.to_string_lossy().to_string(),
+        start_command: None,
+        has_startup: false,
+        has_package_json: false,
+        has_env: false,
+        port: None,
+        scripts: Vec::new(),
+        children,
     });
 }
 
@@ -1019,13 +1216,26 @@ async fn scan_projects(
                 // Le dossier est lui-même un projet.
                 "single" => {
                     let kind = src.kind.as_deref().unwrap_or("service");
-                    push_project(
-                        Path::new(&src.path),
-                        kind,
-                        &start_command,
-                        &command_overrides,
-                        &mut projects,
-                    );
+                    // Fullstack : on passe les noms de sous-dossiers forcés de la
+                    // source (back/front), sinon auto-détection dans push_fullstack.
+                    if kind == "fullstack" {
+                        push_fullstack(
+                            Path::new(&src.path),
+                            src.back_dir.as_deref(),
+                            src.front_dir.as_deref(),
+                            &start_command,
+                            &command_overrides,
+                            &mut projects,
+                        );
+                    } else {
+                        push_project(
+                            Path::new(&src.path),
+                            kind,
+                            &start_command,
+                            &command_overrides,
+                            &mut projects,
+                        );
+                    }
                 }
                 // Chaque sous-dossier direct devient un projet (rescan dynamique).
                 "parent" => {
@@ -1221,6 +1431,142 @@ async fn list_branches(bash: String, path: String) -> Result<Vec<BranchInfo>, St
         }
 
         Ok(branches)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn git_changes(bash: String, path: String) -> Result<Vec<GitChange>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // -z : entrées séparées par NUL, chemins jamais échappés ni quotés (gère
+        // proprement espaces et accents). Chaque entrée vaut "XY <chemin>" ; un
+        // renommage/copie ajoute une entrée NUL supplémentaire pour l'ancien nom.
+        let out = run_capture(
+            &bash,
+            &path,
+            "git -c core.quotepath=false status --porcelain -z 2>/dev/null",
+        )?;
+        let mut changes = Vec::new();
+        let mut it = out.split('\0');
+        while let Some(entry) = it.next() {
+            if entry.len() < 3 {
+                continue; // ignore l'entrée vide finale (NUL de fin)
+            }
+            let bytes = entry.as_bytes();
+            let x = bytes[0] as char; // statut dans l'index
+            let y = bytes[1] as char; // statut dans l'arbre de travail
+            let file = entry[3..].to_string();
+            // Renommage/copie : l'ancien chemin est l'entrée NUL suivante.
+            let orig = if x == 'R' || x == 'C' {
+                it.next().map(|s| s.to_string())
+            } else {
+                None
+            };
+            let untracked = x == '?';
+            let staged = !untracked && x != ' ';
+            // Code affiché : priorité à l'index, sinon l'arbre de travail.
+            let sc = if untracked {
+                '?'
+            } else if x != ' ' {
+                x
+            } else {
+                y
+            };
+            changes.push(GitChange {
+                path: file,
+                orig,
+                status: sc.to_string(),
+                staged,
+                untracked,
+            });
+        }
+        Ok(changes)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn git_diff(
+    bash: String,
+    path: String,
+    file: String,
+    untracked: bool,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let q = sh_quote(&file);
+        let script = if untracked {
+            // Fichier non suivi : pas de version HEAD, on diffe contre /dev/null
+            // (git renvoie un code non nul mais un diff exploitable sur stdout).
+            format!(
+                "git -c core.quotepath=false diff --no-index -- /dev/null {} 2>/dev/null",
+                q
+            )
+        } else {
+            // Toutes les modifications du fichier vs HEAD (indexées + non indexées).
+            format!("git -c core.quotepath=false diff HEAD -- {} 2>/dev/null", q)
+        };
+        run_capture(&bash, &path, &script)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Assemble les chemins en arguments bash sûrs (chacun single-quoté).
+fn quote_files(files: &[String]) -> String {
+    files
+        .iter()
+        .map(|f| format!(" {}", sh_quote(f)))
+        .collect()
+}
+
+#[tauri::command]
+async fn git_stage(bash: String, path: String, files: Vec<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if files.is_empty() {
+            return Ok(());
+        }
+        run_git(&bash, &path, &format!("git add --{}", quote_files(&files)))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn git_unstage(bash: String, path: String, files: Vec<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if files.is_empty() {
+            return Ok(());
+        }
+        // reset -q : retire de l'index sans toucher à l'arbre de travail.
+        run_git(
+            &bash,
+            &path,
+            &format!("git reset -q HEAD --{}", quote_files(&files)),
+        )?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn git_commit(bash: String, path: String, message: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // Ne valide que ce qui est dans l'index (fichiers « stagés »).
+        run_git(&bash, &path, &format!("git commit -m {}", sh_quote(&message)))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn git_push(bash: String, path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // Repli -u : définit l'upstream si la branche courante n'en a pas encore.
+        run_git(&bash, &path, "git push || git push -u origin HEAD")
     })
     .await
     .map_err(|e| e.to_string())?
@@ -4918,6 +5264,12 @@ pub fn run() {
             list_subdirs,
             git_info,
             list_branches,
+            git_changes,
+            git_diff,
+            git_stage,
+            git_unstage,
+            git_commit,
+            git_push,
             start_service,
             stop_service,
             run_action,

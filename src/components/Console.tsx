@@ -1,6 +1,21 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { parseAnsi } from "../ansi";
 import type { LogLine } from "../types";
+import {
+  DndContext,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  closestCenter,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  useSortable,
+  arrayMove,
+  horizontalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 
 /** Nombre max de lignes rendues dans le DOM (le tampon complet reste en mémoire). */
 const RENDER_MAX = 1500;
@@ -53,6 +68,61 @@ const LogRow = memo(function LogRow({ l }: { l: LogLine }) {
   );
 });
 
+/** Un onglet console triable (dnd-kit). L'onglet entier est la poignée ; un seuil
+ *  d'activation laisse passer les clics (sélection) et le clic-molette (fermeture). */
+function SortableTab({
+  t,
+  active,
+  onSelect,
+  onClose,
+}: {
+  t: Tab;
+  active: string | null;
+  onSelect: (id: string) => void;
+  onClose: (id: string) => void;
+}) {
+  const { setNodeRef, attributes, listeners, transform, transition, isDragging } = useSortable({
+    id: t.id,
+  });
+  const style: React.CSSProperties = {
+    transform: CSS.Translate.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : undefined,
+  };
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={"console-tab" + (t.id === active ? " active" : "") + (isDragging ? " dragging" : "")}
+      onClick={() => onSelect(t.id)}
+      onMouseDown={(e) => {
+        // clic molette = fermer l'onglet
+        if (e.button === 1) {
+          e.preventDefault();
+          onClose(t.id);
+        }
+      }}
+      title={t.id}
+      {...attributes}
+      {...listeners}
+    >
+      <span className={"dot " + (t.running ? "dot-run" : "dot-stop")} />
+      <span className="console-tab-name">{t.name}</span>
+      <button
+        className="tab-close"
+        title="Fermer l'onglet (réapparaît via « Console »)"
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation();
+          onClose(t.id);
+        }}
+      >
+        ×
+      </button>
+    </div>
+  );
+}
+
 export function Console({
   tabs,
   active,
@@ -65,9 +135,8 @@ export function Console({
 }: Props) {
   const bodyRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
-  const dragId = useRef<string | null>(null);
-  const [dragOver, setDragOver] = useState<string | null>(null);
   const [atBottom, setAtBottom] = useState(true);
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
 
   const [cmd, setCmd] = useState("");
   const histRef = useRef<string[]>([]);
@@ -138,67 +207,27 @@ export function Console({
   const hidden = Math.max(0, lines.length - RENDER_MAX);
   const visible = hidden > 0 ? lines.slice(hidden) : lines;
 
-  function handleDrop(targetId: string) {
-    const from = dragId.current;
-    dragId.current = null;
-    setDragOver(null);
-    if (!from || from === targetId) return;
+  function onDragEnd(e: DragEndEvent) {
+    const { active: a, over } = e;
+    if (!over || a.id === over.id) return;
     const ids = tabs.map((t) => t.id);
-    const fi = ids.indexOf(from);
-    const ti = ids.indexOf(targetId);
-    if (fi === -1 || ti === -1) return;
-    ids.splice(ti, 0, ids.splice(fi, 1)[0]);
-    onReorder(ids);
+    const from = ids.indexOf(String(a.id));
+    const to = ids.indexOf(String(over.id));
+    if (from === -1 || to === -1) return;
+    onReorder(arrayMove(ids, from, to));
   }
 
   return (
     <div className="console">
       <div className="console-tabs">
         {tabs.length === 0 && <div className="console-empty-tab">Console</div>}
-        {tabs.map((t) => (
-          <div
-            key={t.id}
-            draggable
-            className={
-              "console-tab" +
-              (t.id === active ? " active" : "") +
-              (t.id === dragOver ? " dragover" : "")
-            }
-            onClick={() => setActive(t.id)}
-            onMouseDown={(e) => {
-              // clic molette = fermer l'onglet
-              if (e.button === 1) {
-                e.preventDefault();
-                onClose(t.id);
-              }
-            }}
-            onDragStart={() => (dragId.current = t.id)}
-            onDragOver={(e) => {
-              e.preventDefault();
-              if (dragOver !== t.id) setDragOver(t.id);
-            }}
-            onDragLeave={() => setDragOver((d) => (d === t.id ? null : d))}
-            onDrop={() => handleDrop(t.id)}
-            onDragEnd={() => {
-              dragId.current = null;
-              setDragOver(null);
-            }}
-            title={t.id}
-          >
-            <span className={"dot " + (t.running ? "dot-run" : "dot-stop")} />
-            <span className="console-tab-name">{t.name}</span>
-            <button
-              className="tab-close"
-              title="Fermer l'onglet (réapparaît via « Console »)"
-              onClick={(e) => {
-                e.stopPropagation();
-                onClose(t.id);
-              }}
-            >
-              ×
-            </button>
-          </div>
-        ))}
+        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+          <SortableContext items={tabs.map((t) => t.id)} strategy={horizontalListSortingStrategy}>
+            {tabs.map((t) => (
+              <SortableTab key={t.id} t={t} active={active} onSelect={setActive} onClose={onClose} />
+            ))}
+          </SortableContext>
+        </DndContext>
         <div className="console-actions">
           <button className="btn btn-ghost btn-sm" onClick={onClear} disabled={!active}>
             Vider

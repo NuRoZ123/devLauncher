@@ -1,4 +1,4 @@
-export type ProjectKind = "service" | "package" | "front";
+export type ProjectKind = "service" | "package" | "front" | "fullstack";
 
 /**
  * Une *source* déclarée par l'utilisateur : d'où viennent les projets.
@@ -21,6 +21,13 @@ export interface ProjectSource {
   defaultType?: ProjectKind;
   /** (parent) Type précis, ou exclusion, par nom de sous-dossier. */
   overrides?: Record<string, ProjectKind | "ignored">;
+  /**
+   * (single, type "fullstack") Nom du sous-dossier back, s'il ne suit pas la
+   * convention auto-détectée (back/backend/api…). Vide = auto-détection.
+   */
+  backDir?: string;
+  /** (single, type "fullstack") Nom du sous-dossier front, sinon auto-détecté. */
+  frontDir?: string;
 }
 
 export interface Project {
@@ -35,6 +42,12 @@ export interface Project {
   port: number | null;
   /** Noms des scripts du package.json (ex. ["start", "build", "test"]). */
   scripts: string[];
+  /**
+   * (fullstack) Sous-projets regroupés sous ce projet : commun (package racine,
+   * optionnel), back (service) et front. Chacun est un `Project` normal avec son
+   * propre id/chemin/scripts. Absent (undefined) pour les projets classiques.
+   */
+  children?: Project[];
 }
 
 export interface GitInfo {
@@ -49,6 +62,20 @@ export interface BranchInfo {
   name: string;
   /** true = branche présente uniquement sur le remote (branche « stale »). */
   remote: boolean;
+}
+
+/** Un fichier modifié dans le dépôt (sortie de `git status`). */
+export interface GitChange {
+  /** Chemin relatif à la racine du dépôt (chemin cible d'un renommage). */
+  path: string;
+  /** Ancien chemin en cas de renommage/copie (null sinon). */
+  orig: string | null;
+  /** Code de statut à afficher : "M" | "A" | "D" | "R" | "?" (non suivi). */
+  status: string;
+  /** true = présent dans l'index git (sera pris par le prochain commit). */
+  staged: boolean;
+  /** true = fichier non suivi par git (nouveau). */
+  untracked: boolean;
 }
 
 export type LogStream = "out" | "err" | "sys";
@@ -354,6 +381,25 @@ export interface DbAlterResult {
   statements: string[];
 }
 
+/**
+ * Dossier *virtuel* d'organisation : n'existe que dans devLauncher (aucune
+ * réalité disque). Regroupe des projets pour l'affichage du tableau de bord.
+ */
+export interface ProjectFolder {
+  /** Identifiant stable (attribué à la création), préfixé "folder-". */
+  id: string;
+  name: string;
+  /** Couleur d'affichage de l'entête (CSS "#rrggbb"), optionnelle. */
+  color?: string;
+  /** true = dossier replié (ses enfants masqués). */
+  collapsed?: boolean;
+  /**
+   * Clés enfants ordonnées : id de projet, ou `"folder:<id>"` pour un sous-dossier
+   * (les dossiers peuvent être imbriqués). Nom historique conservé.
+   */
+  projectIds: string[];
+}
+
 export interface Config {
   /**
    * Ancienne racine unique (archi services/ + packages/ + portail-occupant).
@@ -392,6 +438,14 @@ export interface Config {
   db_disabled: Record<string, boolean>;
   /** Disposition sauvegardée du schéma des relations, par id de projet. */
   db_layouts?: Record<string, DbGraphLayout>;
+  /** Dossiers virtuels d'organisation du tableau de bord (avec leurs membres). */
+  folders?: ProjectFolder[];
+  /**
+   * Ordre des entrées à la racine du tableau de bord : soit un id de projet
+   * « libre » (hors dossier), soit "folder:<id>" pour un dossier. Un projet
+   * apparaît à un seul endroit (racine OU membres d'un dossier).
+   */
+  project_layout?: string[];
 }
 
 export interface PkgMeta {

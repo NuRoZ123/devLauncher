@@ -2,11 +2,12 @@ import { useCallback, useEffect, useState } from "react";
 import { api, pickFolder } from "../api";
 import type { ProjectKind, ProjectSource } from "../types";
 
-const KINDS: ProjectKind[] = ["service", "front", "package"];
+const KINDS: ProjectKind[] = ["service", "front", "package", "fullstack"];
 const KIND_LABEL: Record<ProjectKind, string> = {
   service: "Service",
   front: "Front",
   package: "Package",
+  fullstack: "Full-stack",
 };
 
 interface Props {
@@ -171,6 +172,34 @@ export function ProjectSources({ sources, onChange, addButtonsOnTop = false }: P
           </div>
 
           <div className="source-path muted">{src.path}</div>
+
+          {src.mode === "single" && src.type === "fullstack" && (
+            <div className="fullstack-dirs">
+              <small className="muted">
+                Sous-dossiers back / front. Laissez vide pour l'auto-détection
+                (back/backend/api…, front/frontend/web…). Le package.json à la racine, s'il
+                existe, fournit les commandes communes.
+              </small>
+              <div className="fullstack-dirs-row">
+                <label className="fullstack-dir">
+                  <span className="muted">Sous-dossier back</span>
+                  <input
+                    value={src.backDir ?? ""}
+                    placeholder="auto"
+                    onChange={(e) => update(src.id, { backDir: e.target.value })}
+                  />
+                </label>
+                <label className="fullstack-dir">
+                  <span className="muted">Sous-dossier front</span>
+                  <input
+                    value={src.frontDir ?? ""}
+                    placeholder="auto"
+                    onChange={(e) => update(src.id, { frontDir: e.target.value })}
+                  />
+                </label>
+              </div>
+            </div>
+          )}
 
           {src.mode === "parent" && (
             <div className="subdirs">

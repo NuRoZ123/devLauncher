@@ -10,6 +10,7 @@ import type {
   BranchInfo,
   Config,
   DbAlterResult,
+  GitChange,
   DbDriver,
   DbGraphData,
   DbRowUpdate,
@@ -44,6 +45,25 @@ export const api = {
     invoke<GitInfo>("git_info", { bash, path }),
   listBranches: (bash: string, path: string) =>
     invoke<BranchInfo[]>("list_branches", { bash, path }),
+
+  /** Liste les fichiers modifiés du dépôt (git status). */
+  gitChanges: (bash: string, path: string) =>
+    invoke<GitChange[]>("git_changes", { bash, path }),
+  /** Diff d'un fichier (vs HEAD, ou vs vide si non suivi). */
+  gitDiff: (bash: string, path: string, file: string, untracked: boolean) =>
+    invoke<string>("git_diff", { bash, path, file, untracked }),
+  /** Ajoute des fichiers à l'index (git add). */
+  gitStage: (bash: string, path: string, files: string[]) =>
+    invoke<void>("git_stage", { bash, path, files }),
+  /** Retire des fichiers de l'index (git reset). */
+  gitUnstage: (bash: string, path: string, files: string[]) =>
+    invoke<void>("git_unstage", { bash, path, files }),
+  /** Valide ce qui est dans l'index (git commit -m). Renvoie la sortie git. */
+  gitCommit: (bash: string, path: string, message: string) =>
+    invoke<string>("git_commit", { bash, path, message }),
+  /** Pousse la branche courante (git push). Renvoie la sortie git. */
+  gitPush: (bash: string, path: string) =>
+    invoke<string>("git_push", { bash, path }),
 
   startService: (id: string, cwd: string, command: string, bash: string, port: number | null) =>
     invoke<void>("start_service", { id, cwd, command, bash, port }),

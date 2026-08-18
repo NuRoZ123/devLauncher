@@ -442,6 +442,190 @@ input[type="checkbox"]:disabled {
   line-height: 18px;
 }
 
+/* ---------------- Organisation : liste à plat, glisser-déposer (dnd-kit) ------- */
+/* Zone racine : la marge basse offre une cible pour déposer un projet « en fin,
+   hors dossier » (sinon la liste pleine ne laisse aucun espace en dessous). */
+.root-list {
+  padding-bottom: 26px;
+}
+/* Chaque item = poignée « grip » + corps (la ligne, ou le bloc fullstack). */
+.dnd-item {
+  display: flex;
+  align-items: stretch;
+  margin-bottom: 8px;
+}
+.dnd-item-body {
+  flex: 1;
+  min-width: 0;
+}
+.dnd-item-body > .project-row {
+  margin-bottom: 0;
+}
+.dnd-item.dragging {
+  opacity: 0.4;
+}
+/* Poignée de préhension : seule zone qui démarre le glissement (les clics sur les
+   boutons de la ligne restent intacts). */
+.row-grip {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: -2px;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+  opacity: 0.5;
+  transition: opacity 0.12s, color 0.12s;
+}
+.row-grip:hover {
+  opacity: 1;
+  color: var(--text);
+}
+.row-grip:active {
+  cursor: grabbing;
+}
+/* Aperçu suivant le curseur (DragOverlay). */
+.drag-overlay {
+  cursor: grabbing;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  border-radius: var(--radius);
+}
+.drag-overlay .row-grip {
+  opacity: 1;
+}
+
+/* Ligne cliquable au-dessus des projets pour créer un dossier. */
+.add-folder-line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 7px 11px;
+  margin-bottom: 10px;
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  color: var(--muted);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: border-color 0.12s, color 0.12s, background 0.12s;
+}
+.add-folder-line:hover {
+  border-color: var(--accent);
+  color: var(--text);
+  background: var(--panel);
+}
+.add-folder-plus {
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.folder {
+  margin-bottom: 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  background: var(--panel);
+  overflow: hidden;
+}
+.folder.dragging {
+  opacity: 0.5;
+}
+.folder-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--panel-2);
+  border-left: 3px solid var(--folder-color, var(--border));
+  user-select: none;
+}
+.folder-grip {
+  width: 16px;
+}
+/* Projet glissé sur le corps d'un dossier : surbrillance « ranger dans ce dossier ».
+   (L'entête, lui, sert à réordonner le dossier à la racine — pas de surbrillance.) */
+.folder-body.into {
+  outline: 2px solid var(--accent);
+  outline-offset: -3px;
+  background: rgba(79, 140, 255, 0.06);
+  border-radius: 6px;
+}
+/* Dossier replié survolé pour « ranger dedans » : l'entête sert de zone de dépôt. */
+.folder-head.into {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: #233246;
+}
+.folder-ico {
+  flex-shrink: 0;
+  font-size: 13px;
+  opacity: 0.9;
+}
+.folder-name {
+  font-weight: 600;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.folder-name:hover {
+  background: var(--border-soft);
+}
+.folder-name-input {
+  font-weight: 600;
+  min-width: 130px;
+}
+.folder-count {
+  margin-left: auto;
+  background: var(--panel);
+  color: var(--muted);
+  border-radius: 20px;
+  padding: 0 8px;
+  font-size: 11px;
+  line-height: 18px;
+}
+.folder-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.folder-body {
+  padding: 8px 8px 4px;
+  min-height: 12px;
+}
+/* Ligne « Couleur » du menu contextuel du dossier (libellé + sélecteur). */
+.folder-menu-color {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  cursor: default;
+}
+.folder-menu-color:hover {
+  background: transparent;
+}
+/* Dossier vide : invite au dépôt. */
+.folder-empty {
+  padding: 8px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
+  border: 1px dashed var(--border-soft);
+  border-radius: 6px;
+}
+
 .project-row {
   display: flex;
   align-items: center;
@@ -549,6 +733,59 @@ input[type="checkbox"]:disabled {
 }
 .kind-dot-package {
   background: #4fd6a3;
+}
+.badge-fullstack {
+  background: #40300f;
+  color: #e6a94b;
+}
+.kind-dot-fullstack {
+  background: #e6a94b;
+}
+
+/* ----- Projet fullstack : ligne dépliable + sous-projets imbriqués ----- */
+/* Le bloc regroupe la ligne parente et ses sous-lignes (back / front / commun)
+   pour qu'ils se lisent comme un seul ensemble une fois dépliés. */
+.project-block {
+  margin-bottom: 8px;
+}
+/* Les lignes internes du bloc portent déjà leur propre marge ; on la neutralise
+   pour resserrer parent + enfants, et le bloc gère l'espacement extérieur. */
+.project-block .project-row {
+  margin-bottom: 0;
+}
+.project-block.expanded .project-row-fullstack {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+  border-bottom-color: transparent;
+}
+/* Chevron d'expansion (à la place de la pastille de type, avant le nom). */
+.fs-chevron {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  border-radius: 4px;
+  transition: transform 0.12s, color 0.12s;
+}
+.fs-chevron:hover {
+  color: var(--text);
+  background: var(--border-soft);
+}
+.fs-chevron.open {
+  transform: rotate(90deg);
+}
+/* Sous-projet d'un fullstack : indenté, avec un liseré rappelant le rattachement. */
+.project-row-nested {
+  margin-left: 22px;
+  border-left: 2px solid var(--border);
+  border-top-left-radius: 0;
+  background: var(--panel-2, var(--panel));
 }
 
 .project-sub {
@@ -3445,6 +3682,28 @@ button.db-table {
   margin-top: 6px;
   word-break: break-all;
 }
+.fullstack-dirs {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.fullstack-dirs-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.fullstack-dir {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1 1 160px;
+}
+.fullstack-dir input {
+  width: 100%;
+}
 .subdirs {
   margin-top: 10px;
   padding-top: 10px;
@@ -3542,4 +3801,221 @@ button.db-table {
 .cmd-preview {
   margin: 12px 0 4px;
   word-break: break-all;
+}
+
+/* ---------------- Pastille « modifications non commitées » cliquable -------- */
+.chip-dirty-btn {
+  cursor: pointer;
+  font: inherit;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+.chip-dirty-btn:hover {
+  border-color: var(--yellow);
+}
+
+/* ---------------- Page des modifications git ---------------- */
+.gc {
+  max-width: 900px;
+}
+.gc-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 14px 0 4px;
+}
+.gc-sync {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+}
+.gc-count {
+  margin-left: auto;
+  font-size: 12px;
+}
+.gc-section h2 {
+  font-size: 14px;
+}
+.gc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.gc-file {
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--panel);
+}
+.gc-file-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+}
+.gc-grip {
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+  letter-spacing: -2px;
+  cursor: grab;
+  touch-action: none;
+}
+.gc-grip:active {
+  cursor: grabbing;
+}
+.gc-dragging {
+  opacity: 0.45;
+}
+.gc-section {
+  border-radius: 6px;
+}
+.gc-section.gc-drop {
+  outline: 2px dashed var(--accent);
+  outline-offset: 3px;
+  background: rgba(79, 140, 255, 0.05);
+}
+.gc-check {
+  flex: none;
+}
+.gc-status {
+  flex: none;
+  width: 18px;
+  text-align: center;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 4px;
+  padding: 1px 0;
+  color: var(--muted);
+  background: var(--panel-2);
+}
+.gc-status-M {
+  color: var(--yellow);
+  background: var(--yellow-bg);
+}
+.gc-status-A {
+  color: var(--green);
+  background: var(--green-bg);
+}
+.gc-status-D {
+  color: var(--red);
+  background: var(--red-bg);
+}
+.gc-status-R,
+.gc-status-C {
+  color: var(--accent-2);
+}
+.gc-status-u {
+  color: var(--green);
+  background: var(--green-bg);
+}
+.gc-path {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+.gc-path:hover .gc-name {
+  color: var(--accent-2);
+}
+.gc-caret {
+  flex: none;
+  font-size: 9px;
+  color: var(--muted);
+  transition: transform 0.12s;
+}
+.gc-caret.open {
+  transform: rotate(90deg);
+}
+.gc-orig {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.gc-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.gc-diff {
+  margin: 0;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border-soft);
+  background: var(--bg-2);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre;
+  max-height: 420px;
+  overflow-y: auto;
+}
+.gc-dl {
+  display: block;
+}
+.gc-dl-add {
+  color: var(--green);
+  background: rgba(63, 185, 80, 0.08);
+}
+.gc-dl-del {
+  color: var(--red);
+  background: rgba(248, 81, 73, 0.08);
+}
+.gc-dl-hunk {
+  color: var(--accent-2);
+}
+.gc-dl-meta {
+  color: var(--muted);
+}
+.gc-commit {
+  margin-top: 22px;
+}
+.gc-message {
+  width: 100%;
+  resize: vertical;
+  font: inherit;
+  font-size: 13px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--text);
+}
+.gc-message:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.gc-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.gc-output {
+  margin: 12px 0 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--bg-2);
+  border: 1px solid var(--border-soft);
+  color: var(--text-dim);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.gc-output-err {
+  color: var(--red);
+  border-color: var(--red);
+  background: var(--red-bg);
 }

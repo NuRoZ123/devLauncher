@@ -15,6 +15,7 @@ const KIND_LABEL: Record<ProjectKind, string> = {
   service: "service",
   front: "front",
   package: "package",
+  fullstack: "full-stack",
 };
 
 export function SequenceManager({ sequences, mode, projects, actions, onChange }: Props) {

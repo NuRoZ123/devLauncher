@@ -10,6 +10,7 @@ import { DbTableDataView, type DbDataState } from "./components/DbTableDataView"
 import { DbTableSchemaView, type DbSchemaState } from "./components/DbTableSchemaView";
 import { DbRelationsView, type DbGraphState } from "./components/DbRelationsView";
 import { EnvModal, type EnvModalState } from "./components/EnvModal";
+import { GitChangesView } from "./components/GitChangesView";
 import { PackageLinkModal, type LinkModalState } from "./components/PackageLinkModal";
 import { ProjectDetail } from "./components/ProjectDetail";
 import { ProjectRow } from "./components/ProjectRow";
@@ -32,6 +33,43 @@ import {
 import { GeneralSequenceModal } from "./components/GeneralSequenceModal";
 import { checkForUpdate, type UpdateAsset, type UpdateInfo } from "./update";
 import { expandActions, isSequenceValid } from "./sequences";
+import {
+  resolveLayout,
+  createFolder as createFolderLayout,
+  deleteFolder as deleteFolderLayout,
+  renameFolder as renameFolderLayout,
+  setFolderColor as setFolderColorLayout,
+  toggleFolderCollapsed,
+  folderKey,
+  folderIdOf,
+  isFolderKey,
+  FOLDER_PREFIX,
+  type LayoutNode,
+  type LayoutState,
+} from "./layout";
+import {
+  DndContext,
+  DragOverlay,
+  PointerSensor,
+  KeyboardSensor,
+  useSensor,
+  useSensors,
+  useDroppable,
+  pointerWithin,
+  closestCorners,
+  type CollisionDetection,
+  type DragStartEvent,
+  type DragOverEvent,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  useSortable,
+  sortableKeyboardCoordinates,
+  arrayMove,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { parseEnv } from "./env";
 import { basename, dirname, samePath } from "./paths";
 import type {
@@ -46,6 +84,7 @@ import type {
   LogLine,
   PortInfo,
   Project,
+  ProjectFolder,
   ProjectKind,
   ProjectSource,
   QJob,
@@ -116,7 +155,7 @@ const NO_OVERRIDES: Record<string, string> = {};
 const NO_COLORS: Record<string, string> = {};
 const NO_LINKS: Record<string, string> = {};
 const NO_SOURCES: ProjectSource[] = [];
-const KIND_ORDER: ProjectKind[] = ["service", "front", "package"];
+const KIND_ORDER: ProjectKind[] = ["fullstack", "service", "front", "package"];
 
 /** Assemble un chemin en respectant le séparateur du dossier racine. */
 function joinPath(root: string, sub: string): string {
@@ -151,6 +190,7 @@ function migrateSources(root: string): ProjectSource[] {
   ];
 }
 const KIND_TITLE: Record<ProjectKind, string> = {
+  fullstack: "Full-stack",
   service: "Services",
   front: "Front",
   package: "Packages",
@@ -161,6 +201,79 @@ function servicesForLinks(list: Project[]): { id: string; name: string; path: st
   return list
     .filter((p) => p.kind === "service")
     .map((p) => ({ id: p.id, name: p.name, path: p.path }));
+}
+
+// ----- Glisser-déposer du tableau de bord (dnd-kit) -----
+// Id du conteneur racine (dépose « hors dossier »).
+const ROOT = "root";
+// Structure de travail pendant un glissement : la racine (ids de projets libres +
+// clés de dossiers) et, par dossier, ses ids de projets membres.
+type Struct = { root: string[]; folders: Record<string, string[]> };
+
+/** Struct à partir de l'arbre résolu (config → vue courante), récursif. */
+function structFrom(nodes: LayoutNode[]): Struct {
+  const folders: Record<string, string[]> = {};
+  const walk = (list: LayoutNode[]): string[] =>
+    list.map((n) => {
+      if (n.type === "folder") {
+        folders[n.folder.id] = walk(n.children);
+        return folderKey(n.folder.id);
+      }
+      return n.project.id;
+    });
+  return { root: walk(nodes), folders };
+}
+
+/** Ids composant le sous-arbre d'un dossier (lui-même + descendants), pour
+ *  interdire de déposer un dossier dans lui-même ou l'un de ses descendants. */
+function subtreeKeys(s: Struct, folderId: string, acc: Set<string>): void {
+  acc.add(folderId); // id de conteneur
+  acc.add(FOLDER_PREFIX + folderId); // clé triable
+  for (const k of s.folders[folderId] ?? []) {
+    acc.add(k);
+    if (k.startsWith(FOLDER_PREFIX)) subtreeKeys(s, k.slice(FOLDER_PREFIX.length), acc);
+  }
+}
+
+/** Reconstitue l'état persistable (dossiers + layout) depuis une struct. */
+function stateFromStruct(s: Struct, foldersMeta: ProjectFolder[]): LayoutState {
+  const folders = foldersMeta.map((f) => ({ ...f, projectIds: s.folders[f.id] ?? f.projectIds }));
+  return { folders, layout: s.root };
+}
+
+/** Élément triable générique (render-prop) : porte la logique dnd-kit, laisse le
+ *  rendu à l'appelant qui branche `setNodeRef`, `style` et la poignée `handle`. */
+function Sortable({
+  id,
+  children,
+}: {
+  id: string;
+  children: (p: {
+    setNodeRef: (el: HTMLElement | null) => void;
+    style: React.CSSProperties;
+    isDragging: boolean;
+    handle: Record<string, unknown>;
+  }) => React.ReactNode;
+}) {
+  const { setNodeRef, transform, transition, isDragging, attributes, listeners } = useSortable({ id });
+  const style: React.CSSProperties = {
+    transform: CSS.Translate.toString(transform),
+    transition,
+    opacity: isDragging ? 0.4 : undefined,
+  };
+  return <>{children({ setNodeRef, style, isDragging, handle: { ...attributes, ...listeners } })}</>;
+}
+
+/** Zone de dépôt générique (render-prop). */
+function Droppable({
+  id,
+  children,
+}: {
+  id: string;
+  children: (p: { setNodeRef: (el: HTMLElement | null) => void; isOver: boolean }) => React.ReactNode;
+}) {
+  const { setNodeRef, isOver } = useDroppable({ id });
+  return <>{children({ setNodeRef, isOver })}</>;
 }
 
 export default function App() {
@@ -180,8 +293,40 @@ export default function App() {
   const [view, setView] = useState<"dashboard" | "settings">("dashboard");
   // Page de détail d'un projet : suivi par chemin (stable même si le type/id change).
   const [detailPath, setDetailPath] = useState<string | null>(null);
+  // Page des modifications git d'un projet (clic sur la pastille « non commité »).
+  const [gitChangesPath, setGitChangesPath] = useState<string | null>(null);
 
   const [projects, setProjects] = useState<Project[]>([]);
+  // Projets « à plat » : projets top-level + sous-projets des fullstack. Sert à
+  // tout le suivi indexé par id (démarrage, ports, actions, consoles, séquences),
+  // tandis que `projects` reste la liste top-level pour le regroupement/rendu.
+  const allProjects = useMemo(
+    () => projects.flatMap((p) => (p.children?.length ? [p, ...p.children] : [p])),
+    [projects],
+  );
+  // ----- Glisser-déposer (dnd-kit) & dossiers virtuels -----
+  // Élément en cours de déplacement (id de projet ou "folder:<id>"), pour l'overlay.
+  const [activeDrag, setActiveDrag] = useState<string | null>(null);
+  // Structure transitoire pendant un glissement (conteneurs → ids), mise à jour en
+  // direct par dnd-kit ; null hors glissement (on rend alors depuis la config).
+  const [dragStruct, setDragStruct] = useState<Struct | null>(null);
+  const dragStructRef = useRef<Struct | null>(null);
+  // Dossier dont on édite le nom en place (null = aucun), + saisie courante.
+  const [editingFolder, setEditingFolder] = useState<string | null>(null);
+  const [folderNameDraft, setFolderNameDraft] = useState("");
+  // Menu contextuel d'un dossier (clic droit sur l'entête) : renommer/couleur/supprimer.
+  const [folderMenu, setFolderMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+
+  // État déplié des projets fullstack (par id), session uniquement.
+  const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
+  const toggleExpanded = useCallback((p: Project) => {
+    setExpandedRows((prev) => {
+      const n = new Set(prev);
+      if (n.has(p.id)) n.delete(p.id);
+      else n.add(p.id);
+      return n;
+    });
+  }, []);
   const [gitMap, setGitMap] = useState<Record<string, GitInfo>>({});
   const [portInfo, setPortInfo] = useState<Record<string, PortInfo>>({});
   const [pkgLinks, setPkgLinks] = useState<Record<string, { linked: number; present: number }>>(
@@ -381,11 +526,12 @@ export default function App() {
       if (dbWs && !dbWsHidden) setDbWsHidden(true);
       else if (jobsOpen) setJobsOpen(false);
       else if (view === "settings") setView("dashboard");
+      else if (gitChangesPath) setGitChangesPath(null);
       else if (detailPath) setDetailPath(null);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [dbWs, dbWsHidden, jobsOpen, view, detailPath]);
+  }, [dbWs, dbWsHidden, jobsOpen, view, detailPath, gitChangesPath]);
 
   // Repli copier/couper : dans la WebView, Ctrl/Cmd+C ne recopie pas toujours le
   // contenu d'un champ. On force l'action via execCommand (idempotent : si la
@@ -660,7 +806,7 @@ export default function App() {
   const portsBusy = useRef(false);
   const refreshPorts = useCallback(async () => {
     if (portsBusy.current) return; // pas d'empilement si le backend est lent
-    const ports = [...new Set(projects.filter((p) => p.port != null).map((p) => p.port!))];
+    const ports = [...new Set(allProjects.filter((p) => p.port != null).map((p) => p.port!))];
     if (!ports.length) {
       setPortInfo({});
       return;
@@ -670,7 +816,7 @@ export default function App() {
       const infos = await api.portsStatus(ports);
       const byPort = new Map(infos.map((i) => [i.port, i]));
       const next: Record<string, PortInfo> = {};
-      for (const p of projects) {
+      for (const p of allProjects) {
         if (p.port != null) {
           const info = byPort.get(p.port);
           if (info) next[p.id] = info;
@@ -682,7 +828,7 @@ export default function App() {
     } finally {
       portsBusy.current = false;
     }
-  }, [projects]);
+  }, [allProjects]);
 
   useEffect(() => {
     refreshPorts();
@@ -743,11 +889,11 @@ export default function App() {
   // Services dont le port est occupé par un process qui n'est PAS le nôtre.
   const orphanPorts = useMemo(
     () =>
-      projects.filter((p) => {
+      allProjects.filter((p) => {
         const i = portInfo[p.id];
         return p.port != null && !!i?.in_use && !i.owned && !running.has(p.id);
       }),
-    [projects, portInfo, running],
+    [allProjects, portInfo, running],
   );
 
   const freeAllPorts = useCallback(async () => {
@@ -1343,7 +1489,7 @@ export default function App() {
     async (seq: Sequence, targetIds: string[], branch: string) => {
       if (!isSequenceValid(seq, allActions, sequences)) return; // séquence invalide : on ne joue pas
       const expanded = expandActions(seq, allActions, sequences);
-      const targets = projects.filter((p) => targetIds.includes(p.id));
+      const targets = allProjects.filter((p) => targetIds.includes(p.id));
       const built = targets
         .map((p) => {
           const plan: StepPlan[] = [];
@@ -1360,27 +1506,27 @@ export default function App() {
       // chaque projet s'exécute dans sa propre file (en parallèle entre projets)
       built.forEach((b) => chain(b.job, b.project, b.plan));
     },
-    [projects, chain, allActions, sequences],
+    [allProjects, chain, allActions, sequences],
   );
 
   // ----- Actions globales -----
   const startAll = useCallback(() => {
-    projects
+    allProjects
       .filter((p) => p.start_command && !running.has(p.id) && !busy[p.id])
       .forEach((p) => startProject(p));
-  }, [projects, running, busy, startProject]);
+  }, [allProjects, running, busy, startProject]);
 
   const stopAll = useCallback(() => {
-    projects.filter((p) => running.has(p.id)).forEach((p) => stopProject(p));
-  }, [projects, running, stopProject]);
+    allProjects.filter((p) => running.has(p.id)).forEach((p) => stopProject(p));
+  }, [allProjects, running, stopProject]);
 
   const restartAll = useCallback(() => {
     const a = resolveAction("restart");
     if (!a) return;
-    projects
+    allProjects
       .filter((p) => p.start_command && running.has(p.id))
       .forEach((p) => runActionOn(p, a));
-  }, [projects, running, runActionOn, resolveAction]);
+  }, [allProjects, running, runActionOn, resolveAction]);
 
   // ----- Config -----
   const persist = useCallback(async (next: Config) => {
@@ -2249,6 +2395,9 @@ export default function App() {
   // ----- Page de détail d'un projet -----
   const openDetail = useCallback((p: Project) => setDetailPath(p.path), []);
 
+  // ----- Page des modifications git -----
+  const openGitChanges = useCallback((p: Project) => setGitChangesPath(p.path), []);
+
   // Change le type d'un projet : met à jour sa source ET migre les réglages
   // indexés par id (id = "<kind>:<name>", donc l'id change avec le type).
   const changeProjectType = useCallback(
@@ -2371,7 +2520,7 @@ export default function App() {
       ...Object.keys(logs).filter((k) => logs[k]?.length),
     ]);
     for (const c of closedTabs) ids.delete(c); // onglets masqués
-    const projOrder = projects.map((p) => p.id);
+    const projOrder = allProjects.map((p) => p.id);
     const arr = [...ids];
     arr.sort((a, b) => {
       const ia = tabOrder.indexOf(a);
@@ -2383,30 +2532,229 @@ export default function App() {
     });
     return arr.map((id) => ({
       id,
-      name: projects.find((p) => p.id === id)?.name ?? id.split(":").pop() ?? id,
+      name: allProjects.find((p) => p.id === id)?.name ?? id.split(":").pop() ?? id,
       running: running.has(id),
     }));
-  }, [running, openTabs, closedTabs, logs, projects, tabOrder]);
+  }, [running, openTabs, closedTabs, logs, allProjects, tabOrder]);
 
   useEffect(() => {
     if (activeConsole && consoleTabs.find((t) => t.id === activeConsole)) return;
     setActiveConsole(consoleTabs[0]?.id ?? null);
   }, [consoleTabs, activeConsole]);
 
-  const grouped = useMemo(() => {
-    const g: Record<ProjectKind, Project[]> = { service: [], front: [], package: [] };
-    for (const p of projects) g[p.kind].push(p);
-    return g;
-  }, [projects]);
+  // Organisation du tableau de bord : liste à plat ordonnée + dossiers virtuels.
+  // `projects` = projets top-level (les enfants fullstack restent imbriqués sous
+  // leur parent, jamais dans le layout ni un dossier).
+  const cfgFolders = config?.folders ?? [];
+  const cfgLayout = config?.project_layout ?? [];
+  const layoutNodes = useMemo(
+    () => resolveLayout(projects, cfgFolders, cfgLayout),
+    [projects, cfgFolders, cfgLayout],
+  );
+
+  // Persiste un nouvel état d'organisation (dossiers + ordre racine).
+  const persistLayout = useCallback(
+    (next: LayoutState) => {
+      if (!config) return;
+      void persist({ ...config, folders: next.folders, project_layout: next.layout });
+    },
+    [config, persist],
+  );
+  // « Fige » l'ordre racine visible actuel dans le layout avant une mutation :
+  // sans ça, la 1re action après migration (layout vide) placerait mal l'élément,
+  // les autres projets n'étant pas encore explicitement ordonnés.
+  const materialized = useCallback((): LayoutState => {
+    const rootKeys = layoutNodes.map((n) =>
+      n.type === "folder" ? folderKey(n.folder.id) : n.project.id,
+    );
+    return { folders: cfgFolders, layout: rootKeys };
+  }, [layoutNodes, cfgFolders]);
+
+  // Vue courante : struct transitoire pendant un glissement, sinon dérivée de la config.
+  const viewStruct = useMemo(() => dragStruct ?? structFrom(layoutNodes), [dragStruct, layoutNodes]);
+  const projById = useMemo(() => new Map(projects.map((p) => [p.id, p])), [projects]);
+
+  const sensors = useSensors(
+    // Seuil de 5 px : un simple clic sur un bouton de la ligne ne démarre pas un drag.
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+
+  // Conteneur (parent) d'une clé dans une struct donnée. Une clé de dossier
+  // ("folder:<id>") vit dans son parent (racine ou autre dossier) → on la cherche ;
+  // un id de conteneur (folder.id, sans préfixe) se désigne lui-même.
+  const containerOf = useCallback((s: Struct, id: string): string | null => {
+    if (id === ROOT) return ROOT;
+    if (s.folders[id] !== undefined) return id; // id = conteneur dossier
+    if (s.root.includes(id)) return ROOT;
+    for (const fid in s.folders) if (s.folders[fid].includes(id)) return fid;
+    return null;
+  }, []);
+  const itemsOf = (s: Struct, c: string): string[] => (c === ROOT ? s.root : s.folders[c] ?? []);
+  const withItems = (s: Struct, c: string, items: string[]): Struct =>
+    c === ROOT ? { ...s, root: items } : { ...s, folders: { ...s.folders, [c]: items } };
+
+  // Détection de collision : parmi les zones sous le curseur on garde la plus
+  // *spécifique* (plus petite aire) — l'entête d'un dossier (son item triable)
+  // permet de le placer avant/entre d'autres, tandis que son *corps* (imbriqué,
+  // plus petit) sert à ranger dedans. Quand on glisse un DOSSIER, on exclut son
+  // propre sous-arbre pour éviter les cycles (dossier dans lui-même/descendant).
+  // Dossiers REPLIÉS (pas de corps → l'entête sert de zone de dépôt) : selon ce
+  // qu'on glisse, on retire l'un des deux « ids » du dossier fermé pour lever
+  // l'ambiguïté sur son entête :
+  // - un PROJET → on retire la clé de tri (survol = « ranger dedans », conteneur) ;
+  // - un DOSSIER → on retire le conteneur (survol = réordonner ; pour imbriquer
+  //   dans un dossier fermé, le déplier d'abord).
+  const collapsedSortKeys = useMemo(
+    () => new Set(cfgFolders.filter((f) => f.collapsed).map((f) => folderKey(f.id))),
+    [cfgFolders],
+  );
+  const collapsedContainerIds = useMemo(
+    () => new Set(cfgFolders.filter((f) => f.collapsed).map((f) => f.id)),
+    [cfgFolders],
+  );
+  const collision: CollisionDetection = useCallback(
+    (args) => {
+      const activeId = String(args.active.id);
+      const draggingFolder = isFolderKey(activeId);
+      const exclude = draggingFolder ? collapsedContainerIds : collapsedSortKeys;
+      let containers = args.droppableContainers.filter((c) => !exclude.has(String(c.id)));
+      if (draggingFolder) {
+        const blocked = new Set<string>();
+        subtreeKeys(viewStruct, folderIdOf(activeId), blocked);
+        containers = containers.filter((c) => !blocked.has(String(c.id)));
+      }
+      const within = pointerWithin({ ...args, droppableContainers: containers });
+      if (within.length > 1) {
+        const area = (id: string | number) => {
+          const r = args.droppableRects.get(id);
+          return r ? r.width * r.height : Number.POSITIVE_INFINITY;
+        };
+        within.sort((a, b) => area(a.id) - area(b.id));
+      }
+      return within.length ? within : closestCorners({ ...args, droppableContainers: containers });
+    },
+    [viewStruct, collapsedSortKeys, collapsedContainerIds],
+  );
+
+  const setStruct = (s: Struct) => {
+    dragStructRef.current = s;
+    setDragStruct(s);
+  };
+  const onDragStart = useCallback(
+    (e: DragStartEvent) => {
+      const s = structFrom(layoutNodes);
+      setActiveDrag(String(e.active.id));
+      setStruct(s);
+    },
+    [layoutNodes],
+  );
+  const onDragOver = useCallback(
+    (e: DragOverEvent) => {
+      const s = dragStructRef.current;
+      if (!s || !e.over) return;
+      const activeId = String(e.active.id);
+      const overId = String(e.over.id);
+      const from = containerOf(s, activeId);
+      const to = containerOf(s, overId);
+      if (!from || !to || from === to) return;
+      // Anti-cycle : ne pas faire entrer un dossier dans son propre sous-arbre.
+      if (isFolderKey(activeId)) {
+        const blocked = new Set<string>();
+        subtreeKeys(s, folderIdOf(activeId), blocked);
+        if (blocked.has(to)) return;
+      }
+      const fromItems = itemsOf(s, from).filter((x) => x !== activeId);
+      const toItems = [...itemsOf(s, to)];
+      const oi = overId === to ? toItems.length : toItems.indexOf(overId);
+      toItems.splice(oi < 0 ? toItems.length : oi, 0, activeId);
+      setStruct(withItems(withItems(s, from, fromItems), to, toItems));
+    },
+    [containerOf],
+  );
+  const onDragEnd = useCallback(
+    (e: DragEndEvent) => {
+      const s = dragStructRef.current;
+      setActiveDrag(null);
+      setDragStruct(null);
+      dragStructRef.current = null;
+      if (!s || !e.over) return;
+      const activeId = String(e.active.id);
+      const overId = String(e.over.id);
+      const to = containerOf(s, overId);
+      const from = containerOf(s, activeId);
+      let next = s;
+      if (from && to && from === to) {
+        const items = itemsOf(s, to);
+        const oldI = items.indexOf(activeId);
+        const newI = overId === to ? items.length - 1 : items.indexOf(overId);
+        if (oldI >= 0 && newI >= 0 && oldI !== newI) next = withItems(s, to, arrayMove(items, oldI, newI));
+      }
+      persistLayout(stateFromStruct(next, cfgFolders));
+    },
+    [containerOf, persistLayout, cfgFolders],
+  );
+  const onDragCancel = useCallback(() => {
+    setActiveDrag(null);
+    setDragStruct(null);
+    dragStructRef.current = null;
+  }, []);
+
+  const onNewFolder = useCallback(
+    () => persistLayout(createFolderLayout(materialized(), "Nouveau dossier")),
+    [materialized, persistLayout],
+  );
+  const onDeleteFolder = useCallback(
+    (id: string) => persistLayout(deleteFolderLayout(materialized(), id)),
+    [materialized, persistLayout],
+  );
+  const onToggleFolder = useCallback(
+    (id: string) => persistLayout(toggleFolderCollapsed({ folders: cfgFolders, layout: cfgLayout }, id)),
+    [cfgFolders, cfgLayout, persistLayout],
+  );
+  const onFolderColor = useCallback(
+    (id: string, color?: string) =>
+      persistLayout(setFolderColorLayout({ folders: cfgFolders, layout: cfgLayout }, id, color)),
+    [cfgFolders, cfgLayout, persistLayout],
+  );
+  const commitFolderName = useCallback(() => {
+    if (!editingFolder) return;
+    persistLayout(
+      renameFolderLayout({ folders: cfgFolders, layout: cfgLayout }, editingFolder, folderNameDraft),
+    );
+    setEditingFolder(null);
+  }, [editingFolder, folderNameDraft, cfgFolders, cfgLayout, persistLayout]);
+  const closeFolderMenu = useCallback(() => setFolderMenu(null), []);
+  // Ferme le menu contextuel du dossier sur Échap.
+  useEffect(() => {
+    if (!folderMenu) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && closeFolderMenu();
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [folderMenu, closeFolderMenu]);
 
   // Projet affiché en détail (suivi par chemin, stable au changement de type).
-  const detailProject = detailPath ? projects.find((p) => p.path === detailPath) ?? null : null;
+  // On exclut le parent fullstack (purement structurel) : il partage son chemin
+  // avec son sous-projet commun, et n'ouvre jamais de page de détail lui-même.
+  const detailProject = detailPath
+    ? allProjects.find((p) => p.path === detailPath && p.kind !== "fullstack") ?? null
+    : null;
   // Referme la page si son projet a disparu (source retirée), hors période de scan.
   useEffect(() => {
-    if (detailPath && !scanning && !projects.some((p) => p.path === detailPath)) {
+    if (detailPath && !scanning && !allProjects.some((p) => p.path === detailPath)) {
       setDetailPath(null);
     }
-  }, [detailPath, scanning, projects]);
+  }, [detailPath, scanning, allProjects]);
+
+  // Projet dont on affiche les modifications git (même suivi par chemin).
+  const gitChangesProject = gitChangesPath
+    ? allProjects.find((p) => p.path === gitChangesPath && p.kind !== "fullstack") ?? null
+    : null;
+  useEffect(() => {
+    if (gitChangesPath && !scanning && !allProjects.some((p) => p.path === gitChangesPath)) {
+      setGitChangesPath(null);
+    }
+  }, [gitChangesPath, scanning, allProjects]);
 
   const serviceSequences = useMemo(() => sequences.filter((s) => !s.global), [sequences]);
   const globalSequences = useMemo(() => sequences.filter((s) => !!s.global), [sequences]);
@@ -2423,11 +2771,215 @@ export default function App() {
   }, []);
 
   const runningCount = running.size;
-  const canStartAny = projects.some(
+  const canStartAny = allProjects.some(
     (p) => p.start_command && !running.has(p.id) && !busy[p.id],
   );
   const canStopAny = runningCount > 0;
   const activeJobs = jobs.filter((j) => j.status === "running" || j.status === "pending").length;
+
+  // Rend une ligne de projet. `nested` = sous-projet d'un fullstack (indenté,
+  // sans chip branche ni bouton dépôt : git géré au niveau du parent).
+  const renderRow = (p: Project, nested = false) => (
+    <ProjectRow
+      key={p.id}
+      project={p}
+      git={gitMap[p.id]}
+      running={running.has(p.id)}
+      busy={busy[p.id]}
+      portInfo={portInfo[p.id]}
+      linkStatus={pkgLinks[p.id]}
+      testResult={testResults[p.id]}
+      actions={allActions}
+      sequences={serviceSequences}
+      onStart={onStartRow}
+      onStop={onStopRow}
+      onAction={runActionOn}
+      onSequence={runSequenceOn}
+      onOpenConsole={onOpenConsoleRow}
+      onCheckout={checkout}
+      onRefreshGit={refreshGitFor}
+      onLinkPackage={openPackageLinks}
+      onFreePort={onFreePort}
+      onRunTests={onRunTestsRow}
+      onEditEnv={openEnv}
+      onDbConnect={openDb}
+      onDbRetest={retestDb}
+      onDbOpenTables={openDbWorkspace}
+      dbConn={config?.db_connections?.[p.id]}
+      dbTesting={dbTesting.has(p.id)}
+      dbDisabled={!!config?.db_disabled?.[p.id]}
+      onEditStartCommand={openProjectCommand}
+      repoLink={repoLinkFor(p)}
+      onOpenUrl={openUrl}
+      onEditRepo={editRepo}
+      onOpenDetail={openDetail}
+      onOpenGitChanges={openGitChanges}
+      hiddenRepoActions={config?.repo_actions_hidden?.[p.id]}
+      onRunScriptArgs={onRunScriptArgs}
+      dense={rowLayout.dense}
+      hidePort={rowLayout.hidePort}
+      foldSecondary={rowLayout.fold}
+      nested={nested}
+      expanded={expandedRows.has(p.id)}
+      onToggleExpand={toggleExpanded}
+    />
+  );
+
+  // Rend une ligne de projet triable (dnd-kit) : poignée « grip » + la ligne
+  // (un projet fullstack embarque ses enfants). Le conteneur (racine/dossier) est
+  // porté par le SortableContext parent.
+  const renderProjectItem = (p: Project) => {
+    const isFs = p.kind === "fullstack";
+    return (
+      <Sortable id={p.id} key={p.id}>
+        {({ setNodeRef, style, isDragging, handle }) => (
+          <div
+            ref={setNodeRef}
+            style={style}
+            className={
+              "dnd-item" +
+              (isFs ? " project-block" + (expandedRows.has(p.id) ? " expanded" : "") : "") +
+              (isDragging ? " dragging" : "")
+            }
+          >
+            <span className="row-grip" title="Glisser pour déplacer" {...handle}>
+              ⠿
+            </span>
+            <div className="dnd-item-body">
+              {renderRow(p)}
+              {isFs && expandedRows.has(p.id) && (p.children ?? []).map((c) => renderRow(c, true))}
+            </div>
+          </div>
+        )}
+      </Sortable>
+    );
+  };
+
+  // Rend un dossier virtuel : entête (poignée, repli, nom, options) + ses enfants
+  // (projets ET sous-dossiers, SortableContext imbriqué). Le dossier est lui-même
+  // triable dans son parent et une zone de dépôt (`useDroppable`).
+  const renderFolder = (folder: ProjectFolder, childKeys: string[]) => {
+    const fkey = folderKey(folder.id);
+    const collapsed = !!folder.collapsed;
+    const editing = editingFolder === folder.id;
+    // Entête. `intoOver` = un projet/dossier est survolé pour être rangé dedans
+    // (cas replié : l'entête EST la zone de dépôt, d'où la surbrillance).
+    const head = (handle: Record<string, unknown>, intoOver: boolean) => (
+      <div
+        className={"folder-head" + (intoOver ? " into" : "")}
+        style={folder.color ? ({ "--folder-color": folder.color } as React.CSSProperties) : undefined}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setFolderMenu({ id: folder.id, x: e.clientX, y: e.clientY });
+        }}
+      >
+        <span className="row-grip folder-grip" title="Glisser le dossier" {...handle}>
+          ⠿
+        </span>
+        <button
+          className={"fs-chevron" + (collapsed ? "" : " open")}
+          title={collapsed ? "Déplier le dossier" : "Replier le dossier"}
+          onClick={() => onToggleFolder(folder.id)}
+        >
+          ▸
+        </button>
+        <span className="folder-ico" aria-hidden="true">
+          📁
+        </span>
+        {editing ? (
+          <input
+            className="folder-name-input"
+            autoFocus
+            value={folderNameDraft}
+            onChange={(e) => setFolderNameDraft(e.target.value)}
+            onBlur={commitFolderName}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") commitFolderName();
+              else if (e.key === "Escape") setEditingFolder(null);
+            }}
+          />
+        ) : (
+          <button
+            className="folder-name"
+            title="Double-clic pour renommer · clic droit pour les options"
+            onDoubleClick={() => {
+              setFolderNameDraft(folder.name);
+              setEditingFolder(folder.id);
+            }}
+          >
+            {folder.name}
+          </button>
+        )}
+        <span className="folder-count">{childKeys.length}</span>
+      </div>
+    );
+    return (
+      <Sortable id={fkey} key={folder.id}>
+        {({ setNodeRef, style, isDragging, handle }) => (
+          <div ref={setNodeRef} style={style} className={"folder" + (isDragging ? " dragging" : "")}>
+            {collapsed ? (
+              // Replié : l'entête devient la zone de dépôt « ranger dedans ».
+              <Droppable id={folder.id}>
+                {({ setNodeRef: setDropRef, isOver }) => (
+                  <div ref={setDropRef}>{head(handle, isOver)}</div>
+                )}
+              </Droppable>
+            ) : (
+              <>
+                {head(handle, false)}
+                <Droppable id={folder.id}>
+                  {({ setNodeRef: setDropRef, isOver }) => (
+                    <div ref={setDropRef} className={"folder-body" + (isOver ? " into" : "")}>
+                      <SortableContext items={childKeys} strategy={verticalListSortingStrategy}>
+                        {childKeys.map((k) => renderChild(k))}
+                      </SortableContext>
+                      {childKeys.length === 0 && (
+                        <div className="folder-empty">Glissez un projet ou un dossier ici</div>
+                      )}
+                    </div>
+                  )}
+                </Droppable>
+              </>
+            )}
+          </div>
+        )}
+      </Sortable>
+    );
+  };
+
+  // Rend une clé enfant (projet ou sous-dossier) selon son type — récursif.
+  const renderChild = (key: string) => {
+    if (isFolderKey(key)) {
+      const f = cfgFolders.find((x) => x.id === folderIdOf(key));
+      if (!f) return null;
+      return renderFolder(f, viewStruct.folders[f.id] ?? []);
+    }
+    const p = projById.get(key);
+    return p ? renderProjectItem(p) : null;
+  };
+
+  // Aperçu suivant le curseur pendant un glissement (DragOverlay).
+  const renderOverlay = () => {
+    if (!activeDrag) return null;
+    if (isFolderKey(activeDrag)) {
+      const f = cfgFolders.find((x) => x.id === folderIdOf(activeDrag));
+      return f ? (
+        <div className="folder drag-overlay">
+          <div className="folder-head">
+            <span className="folder-ico">📁</span>
+            <span className="folder-name">{f.name}</span>
+          </div>
+        </div>
+      ) : null;
+    }
+    const p = projById.get(activeDrag);
+    return p ? (
+      <div className="dnd-item drag-overlay">
+        <div className="dnd-item-body">{renderRow(p)}</div>
+      </div>
+    ) : null;
+  };
 
   // ----- Rendu -----
   if (!ready) return <div className="boot"><span className="spinner" /> Chargement…</div>;
@@ -2628,9 +3180,19 @@ export default function App() {
       {view === "settings" ? (
         <SettingsView
           config={config}
-          projects={projects}
+          projects={allProjects}
           onPersist={persist}
           onClose={() => setView("dashboard")}
+        />
+      ) : gitChangesProject ? (
+        <GitChangesView
+          key={gitChangesProject.id}
+          project={gitChangesProject}
+          git={gitMap[gitChangesProject.id]}
+          bash={bash}
+          onBack={() => setGitChangesPath(null)}
+          onChanged={() => refreshGitFor(gitChangesProject)}
+          onCheckout={checkout}
         />
       ) : detailProject ? (
         <ProjectDetail
@@ -2669,57 +3231,86 @@ export default function App() {
               </div>
             )}
 
-            {KIND_ORDER.map((kind) =>
-              grouped[kind].length === 0 ? null : (
-                <div className="group" key={kind}>
-                  <div className="group-head">
-                    <h2>{KIND_TITLE[kind]}</h2>
-                    <span className="group-count">{grouped[kind].length}</span>
-                  </div>
-                  {grouped[kind].map((p) => (
-                    <ProjectRow
-                      key={p.id}
-                      project={p}
-                      git={gitMap[p.id]}
-                      running={running.has(p.id)}
-                      busy={busy[p.id]}
-                      portInfo={portInfo[p.id]}
-                      linkStatus={pkgLinks[p.id]}
-                      testResult={testResults[p.id]}
-                      actions={allActions}
-                      sequences={serviceSequences}
-                      onStart={onStartRow}
-                      onStop={onStopRow}
-                      onAction={runActionOn}
-                      onSequence={runSequenceOn}
-                      onOpenConsole={onOpenConsoleRow}
-                      onCheckout={checkout}
-                      onRefreshGit={refreshGitFor}
-                      onLinkPackage={openPackageLinks}
-                      onFreePort={onFreePort}
-                      onRunTests={onRunTestsRow}
-                      onEditEnv={openEnv}
-                      onDbConnect={openDb}
-                      onDbRetest={retestDb}
-                      onDbOpenTables={openDbWorkspace}
-                      dbConn={config?.db_connections?.[p.id]}
-                      dbTesting={dbTesting.has(p.id)}
-                      dbDisabled={!!config?.db_disabled?.[p.id]}
-                      onEditStartCommand={openProjectCommand}
-                      repoLink={repoLinkFor(p)}
-                      onOpenUrl={openUrl}
-                      onEditRepo={editRepo}
-                      onOpenDetail={openDetail}
-                      hiddenRepoActions={config?.repo_actions_hidden?.[p.id]}
-                      onRunScriptArgs={onRunScriptArgs}
-                      dense={rowLayout.dense}
-                      hidePort={rowLayout.hidePort}
-                      foldSecondary={rowLayout.fold}
-                    />
-                  ))}
-                </div>
-              ),
+            {/* Ligne cliquable au-dessus des projets : créer un dossier virtuel. */}
+            {projects.length > 0 && (
+              <button className="add-folder-line" onClick={onNewFolder}>
+                <span className="add-folder-plus">+</span> Nouveau dossier
+              </button>
             )}
+            {projects.length > 0 && (
+              <DndContext
+                sensors={sensors}
+                collisionDetection={collision}
+                onDragStart={onDragStart}
+                onDragOver={onDragOver}
+                onDragEnd={onDragEnd}
+                onDragCancel={onDragCancel}
+              >
+                <Droppable id={ROOT}>
+                  {({ setNodeRef }) => (
+                    <div ref={setNodeRef} className="root-list">
+                      <SortableContext items={viewStruct.root} strategy={verticalListSortingStrategy}>
+                        {viewStruct.root.map((key) => renderChild(key))}
+                      </SortableContext>
+                    </div>
+                  )}
+                </Droppable>
+                <DragOverlay>{renderOverlay()}</DragOverlay>
+              </DndContext>
+            )}
+            {folderMenu &&
+              (() => {
+                const f = cfgFolders.find((x) => x.id === folderMenu.id);
+                if (!f) return null;
+                const W = 210;
+                const left = Math.max(8, Math.min(folderMenu.x, window.innerWidth - W - 8));
+                const top = Math.max(8, Math.min(folderMenu.y, window.innerHeight - 180));
+                return (
+                  <>
+                    <div
+                      className="dropdown-backdrop"
+                      onClick={closeFolderMenu}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        closeFolderMenu();
+                      }}
+                    />
+                    <div
+                      className="context-menu folder-menu"
+                      style={{ position: "fixed", left, top, width: W }}
+                    >
+                      <div className="menu-title">{f.name}</div>
+                      <button
+                        className="menu-item"
+                        onClick={() => {
+                          closeFolderMenu();
+                          setFolderNameDraft(f.name);
+                          setEditingFolder(f.id);
+                        }}
+                      >
+                        ✎ Renommer
+                      </button>
+                      <div className="menu-item folder-menu-color">
+                        <span>🎨 Couleur</span>
+                        <ColorPicker
+                          value={f.color}
+                          onChange={(c) => onFolderColor(f.id, c || undefined)}
+                        />
+                      </div>
+                      <div className="menu-sep" />
+                      <button
+                        className="menu-item menu-danger"
+                        onClick={() => {
+                          closeFolderMenu();
+                          onDeleteFolder(f.id);
+                        }}
+                      >
+                        🗑 Supprimer
+                      </button>
+                    </div>
+                  </>
+                );
+              })()}
             {projects.length === 0 && !scanning && !scanError && (
               <div className="empty">
                 {sources.length === 0
@@ -3293,7 +3884,12 @@ function SettingsView({
                 >
                   <option value="">+ Ajouter une exception…</option>
                   {projects
-                    .filter((p) => p.kind !== "package" && !(p.id in overrides))
+                    .filter(
+                      (p) =>
+                        p.kind !== "package" &&
+                        p.kind !== "fullstack" &&
+                        !(p.id in overrides),
+                    )
                     .map((p) => (
                       <option key={p.id} value={p.id}>
                         {p.name}

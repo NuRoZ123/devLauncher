@@ -55,6 +55,8 @@ interface Props {
   onEditRepo: (p: Project) => void;
   /** Ouvre la page de détail du projet (clic sur le nom). */
   onOpenDetail: (p: Project) => void;
+  /** Ouvre la page des modifications git (clic sur la pastille « non commité »). */
+  onOpenGitChanges: (p: Project) => void;
   /** Clés d'actions du menu dépôt à masquer pour ce projet. */
   hiddenRepoActions?: string[];
   /** Clic droit sur un script du package.json : saisir des arguments avant exécution. */
@@ -66,6 +68,13 @@ interface Props {
   /** Palier « étroit » : .env / BDD / dépôt se replient dans le menu ⋯ pour laisser
    *  la place au nom du projet. */
   foldSecondary?: boolean;
+  /** true = sous-projet d'un fullstack : ligne indentée, sans branche ni dépôt
+   *  (git géré au niveau du parent), et sans bouton « Lier » (package commun). */
+  nested?: boolean;
+  /** (fullstack) true = la ligne est dépliée (montre ses sous-projets). */
+  expanded?: boolean;
+  /** (fullstack) Bascule l'affichage des sous-projets (clic sur le chevron/nom). */
+  onToggleExpand?: (p: Project) => void;
 }
 
 /** Icône base de données (cylindre), hérite de la couleur du bouton. */
@@ -165,6 +174,7 @@ const KIND_LABEL: Record<string, string> = {
   service: "service",
   front: "front",
   package: "package",
+  fullstack: "full-stack",
 };
 
 const MENU_W = 230;
@@ -257,12 +267,17 @@ export const ProjectRow = memo(function ProjectRow({
   onOpenUrl,
   onEditRepo,
   onOpenDetail,
+  onOpenGitChanges,
   hiddenRepoActions,
   onRunScriptArgs,
   dense,
   hidePort,
   foldSecondary,
+  nested,
+  expanded,
+  onToggleExpand,
 }: Props) {
+  const isFullstack = project.kind === "fullstack";
   const startable = project.start_command != null;
   const state = busy ? "busy" : running ? "run" : "stop";
 
@@ -626,12 +641,30 @@ export const ProjectRow = memo(function ProjectRow({
   );
 
   return (
-    <div className={"project-row state-" + state} onContextMenu={openAt}>
+    <div
+      className={
+        "project-row state-" +
+        state +
+        (isFullstack ? " project-row-fullstack" : "") +
+        (nested ? " project-row-nested" : "")
+      }
+      onContextMenu={openAt}
+    >
       <span className={"dot dot-" + (busy ? "busy" : running ? "run" : "stop")} />
 
       <div className="project-main">
         <div className="project-title">
-          {dense && (
+          {isFullstack && (
+            <button
+              className={"fs-chevron" + (expanded ? " open" : "")}
+              title={expanded ? "Replier les sous-projets" : "Déplier back / front / commun"}
+              aria-label={expanded ? "Replier" : "Déplier"}
+              onClick={() => onToggleExpand?.(project)}
+            >
+              ▸
+            </button>
+          )}
+          {dense && !isFullstack && (
             <span
               className={"kind-dot kind-dot-" + project.kind}
               title={KIND_LABEL[project.kind]}
@@ -639,30 +672,36 @@ export const ProjectRow = memo(function ProjectRow({
           )}
           <button
             className="project-name project-name-btn"
-            title="Voir le détail du projet"
-            onClick={() => onOpenDetail(project)}
+            title={isFullstack ? "Déplier / replier les sous-projets" : "Voir le détail du projet"}
+            onClick={() => (isFullstack ? onToggleExpand?.(project) : onOpenDetail(project))}
           >
             {project.name}
           </button>
           {!dense && <span className={"badge badge-" + project.kind}>{KIND_LABEL[project.kind]}</span>}
         </div>
         <div className="project-sub">
-          <button
-            className="chip chip-branch"
-            title={git ? `Branche ${git.branch} — changer de branche` : "Changer de branche"}
-            onClick={() => onCheckout(project)}
-          >
-            <span className="chip-ico">⌥</span>
-            {git ? (
-              <span className="chip-branch-txt">{git.branch}</span>
-            ) : (
-              <span className="spinner spinner-xs" />
-            )}
-          </button>
-          {dirty && !hidePort && (
-            <span className="chip chip-dirty" title="Modifications non commitées">
+          {!nested && (
+            <button
+              className="chip chip-branch"
+              title={git ? `Branche ${git.branch} — changer de branche` : "Changer de branche"}
+              onClick={() => onCheckout(project)}
+            >
+              <span className="chip-ico">⌥</span>
+              {git ? (
+                <span className="chip-branch-txt">{git.branch}</span>
+              ) : (
+                <span className="spinner spinner-xs" />
+              )}
+            </button>
+          )}
+          {!nested && dirty && !hidePort && (
+            <button
+              className="chip chip-dirty chip-dirty-btn"
+              title="Voir les modifications non commitées"
+              onClick={() => onOpenGitChanges(project)}
+            >
               ● {git!.changes}
-            </span>
+            </button>
           )}
           {project.port != null &&
             (() => {
@@ -789,29 +828,31 @@ export const ProjectRow = memo(function ProjectRow({
           </button>
         )}
 
-        <button
-          ref={repoBtnRef}
-          className={"btn btn-sm btn-ico btn-repo" + (repoLink ? " on" : "") + (repoLoading ? " loading" : "")}
-          title={
-            repoLoading
-              ? "Recherche du dépôt…"
-              : repoLink
-                ? "Dépôt : liens GitLab / GitHub · clic droit : modifier le lien"
-                : "Lier un dépôt Git (clic pour configurer)"
-          }
-          onClick={() => {
-            if (repoLoading) return;
-            if (repoLink) toggleRepoMenu();
-            else onEditRepo(project);
-          }}
-          onContextMenu={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            if (!repoLoading) onEditRepo(project);
-          }}
-        >
-          {repoLoading ? <span className="spinner spinner-xs" /> : <RepoIcon />}
-        </button>
+        {!nested && (
+          <button
+            ref={repoBtnRef}
+            className={"btn btn-sm btn-ico btn-repo" + (repoLink ? " on" : "") + (repoLoading ? " loading" : "")}
+            title={
+              repoLoading
+                ? "Recherche du dépôt…"
+                : repoLink
+                  ? "Dépôt : liens GitLab / GitHub · clic droit : modifier le lien"
+                  : "Lier un dépôt Git (clic pour configurer)"
+            }
+            onClick={() => {
+              if (repoLoading) return;
+              if (repoLink) toggleRepoMenu();
+              else onEditRepo(project);
+            }}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              if (!repoLoading) onEditRepo(project);
+            }}
+          >
+            {repoLoading ? <span className="spinner spinner-xs" /> : <RepoIcon />}
+          </button>
+        )}
 
         <button
           ref={actionsBtnRef}
@@ -823,7 +864,7 @@ export const ProjectRow = memo(function ProjectRow({
           <DotsIcon />
         </button>
 
-        {project.kind === "package" &&
+        {project.kind === "package" && !nested &&
           (() => {
             const ls = linkStatus;
             const linked = ls?.linked ?? 0;
