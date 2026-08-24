@@ -5,7 +5,8 @@ export interface LinkModalState {
   pkg: Project;
   depName: string;
   version: string;
-  folder: string;
+  /** Valeur écrite dans le package.json pour lier (chemin absolu `file:…`). */
+  linkValue: string;
   services: ServiceDep[];
   loading: boolean;
   error?: string;
@@ -25,7 +26,7 @@ export function PackageLinkModal({ state, busyId, onApply, onClose }: Props) {
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  const linkPath = `../../packages/${state.folder}`;
+  const linkPath = state.linkValue;
   const restoreValue = state.version;
   const present = state.services.filter((s) => s.present);
   const absent = state.services.filter((s) => !s.present);
@@ -46,7 +47,8 @@ export function PackageLinkModal({ state, busyId, onApply, onClose }: Props) {
           {state.version && <span className="chip">v{state.version}</span>}
         </div>
         <div className="link-paths muted">
-          Lier → <code>{linkPath}</code> &nbsp;·&nbsp; Restaurer → <code>{restoreValue}</code>
+          Lier → <code title={linkPath}>{linkPath}</code> &nbsp;·&nbsp; Restaurer →{" "}
+          <code>{restoreValue}</code>
         </div>
 
         {state.error && <div className="banner-error">{state.error}</div>}

@@ -26,6 +26,10 @@ export interface DbDataState {
   limit: number;
   /** Filtre WHERE simple appliqué (chaîne saisie par l'utilisateur). */
   filter: string;
+  /** Colonne de tri active (ORDER BY côté serveur), null si aucun tri. */
+  orderBy: string | null;
+  /** Sens du tri appliqué à `orderBy`. */
+  orderDir: "asc" | "desc";
   loading: boolean;
   /** true = il reste probablement des lignes à charger (scroll infini). */
   hasMore: boolean;
@@ -41,6 +45,8 @@ interface Props {
   state: DbDataState;
   onLimitChange: (limit: number) => void;
   onFilterChange: (filter: string) => void;
+  /** Trie sur `column` : `null` retire le tri (ordre naturel de la base). */
+  onSort: (column: string | null, dir: "asc" | "desc") => void;
   onRefresh: () => void;
   /** Enregistre en base les ajouts + modifications + suppressions en attente. */
   onApply: (
@@ -86,6 +92,7 @@ export function DbTableDataView({
   state,
   onLimitChange,
   onFilterChange,
+  onSort,
   onRefresh,
   onApply,
   onLoadMore,
@@ -632,6 +639,13 @@ export function DbTableDataView({
     if (state.filter) onFilterChange("");
   };
 
+  // Clic sur un en-tête de colonne : cycle asc → desc → aucun tri.
+  const cycleSort = (col: string) => {
+    if (state.orderBy !== col) onSort(col, "asc");
+    else if (state.orderDir === "asc") onSort(col, "desc");
+    else onSort(null, "asc");
+  };
+
   return (
     <div className="dbdata-embed">
         <div className="dbdata-head">
@@ -832,12 +846,28 @@ export function DbTableDataView({
                 <thead>
                   <tr>
                     <th className="dbdata-rownum">#</th>
-                    {state.columns.map((c, ci) => (
-                      <th key={c} title={state.types[ci] ? `${c} · ${state.types[ci]}` : c}>
-                        <span className="dbdata-col-name">{c}</span>
-                        {state.types[ci] && <span className="dbdata-col-type">{state.types[ci]}</span>}
-                      </th>
-                    ))}
+                    {state.columns.map((c, ci) => {
+                      const sorted = state.orderBy === c;
+                      return (
+                        <th
+                          key={c}
+                          className={"dbdata-th-sort" + (sorted ? " dbdata-sorted" : "")}
+                          title={
+                            (state.types[ci] ? `${c} · ${state.types[ci]}` : c) +
+                            " — cliquer pour trier (asc / desc / aucun)"
+                          }
+                          onClick={() => cycleSort(c)}
+                        >
+                          <span className="dbdata-col-name">{c}</span>
+                          {state.types[ci] && (
+                            <span className="dbdata-col-type">{state.types[ci]}</span>
+                          )}
+                          <span className="dbdata-sort-ind">
+                            {sorted ? (state.orderDir === "asc" ? "▲" : "▼") : ""}
+                          </span>
+                        </th>
+                      );
+                    })}
                   </tr>
                 </thead>
                 <tbody>

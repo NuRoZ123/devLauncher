@@ -196,6 +196,41 @@ const KIND_TITLE: Record<ProjectKind, string> = {
   package: "Packages",
 };
 
+/**
+ * Ré-applique la commande de démarrage effective d'un projet *et de ses
+ * sous-projets* (fullstack) : l'exception du projet si elle existe, sinon la
+ * commande par défaut. Le scan résout déjà cette commande, mais son résultat
+ * date du dernier scan : la ré-appliquer ici garantit qu'une modification de
+ * commande est prise en compte immédiatement (le scan ne sert plus qu'à savoir
+ * *si* un projet est démarrable). `start_command: null` (package, parent
+ * fullstack : rien à lancer) est préservé tel quel.
+ */
+function withCommands(p: Project, def: string, overrides: Record<string, string>): Project {
+  const cmd = (overrides[p.id] ?? "").trim() || def;
+  return {
+    ...p,
+    start_command: p.start_command == null || !cmd ? p.start_command : cmd,
+    children: p.children?.map((c) => withCommands(c, def, overrides)),
+  };
+}
+
+/**
+ * Valeur écrite dans le `package.json` d'un service pour pointer vers un package
+ * local : le chemin **absolu** du dossier du package, tel que le scan l'a trouvé,
+ * au format `file:` de npm.
+ *
+ * Absolu et non plus `../../packages/<nom>` : depuis les sources configurables,
+ * les projets ne vivent plus dans une arborescence figée (un package et un
+ * service peuvent être dans deux dossiers sans rapport, voire sur deux disques),
+ * et un chemin relatif écrit en dur y pointait dans le vide.
+ *
+ * Les séparateurs sont normalisés en « / » : npm les accepte sous Windows, et ça
+ * évite d'avoir des « \ » à échapper dans le JSON.
+ */
+function localLinkValue(pkgPath: string): string {
+  return "file:" + pkgPath.replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
 /** Réduit une liste de projets aux références de services attendues par `package_links`. */
 function servicesForLinks(list: Project[]): { id: string; name: string; path: string }[] {
   return list
@@ -296,7 +331,21 @@ export default function App() {
   // Page des modifications git d'un projet (clic sur la pastille « non commité »).
   const [gitChangesPath, setGitChangesPath] = useState<string | null>(null);
 
-  const [projects, setProjects] = useState<Project[]>([]);
+  // Commande de démarrage par défaut + exceptions par projet (déclarées ici :
+  // elles servent dès la résolution des commandes des projets, juste dessous).
+  const startCmd = config?.start_command ?? "";
+  const cmdOverrides = config?.command_overrides ?? NO_OVERRIDES;
+
+  // Projets tels que renvoyés par le dernier scan.
+  const [scanned, setScanned] = useState<Project[]>([]);
+  // Projets exploités par l'interface : ceux du scan, mais avec la commande de
+  // démarrage ré-résolue depuis la config courante (exception du projet, sinon
+  // commande par défaut). Sans ça, une commande modifiée n'était appliquée qu'au
+  // scan suivant : le clic sur « Démarrer » relançait l'ancienne commande.
+  const projects = useMemo(
+    () => scanned.map((p) => withCommands(p, startCmd, cmdOverrides)),
+    [scanned, startCmd, cmdOverrides],
+  );
   // Projets « à plat » : projets top-level + sous-projets des fullstack. Sert à
   // tout le suivi indexé par id (démarrage, ports, actions, consoles, séquences),
   // tandis que `projects` reste la liste top-level pour le regroupement/rendu.
@@ -570,8 +619,6 @@ export default function App() {
 
   const bash = config?.git_bash_path ?? DEFAULT_GIT_BASH;
   const sources = config?.sources ?? NO_SOURCES;
-  const startCmd = config?.start_command ?? "";
-  const cmdOverrides = config?.command_overrides ?? NO_OVERRIDES;
   const projectLinks = config?.project_links ?? NO_LINKS;
   const sequences = config?.sequences ?? [];
   const customActions = config?.custom_actions ?? [];
@@ -743,7 +790,7 @@ export default function App() {
     }
     setScanError(null);
     if (!sources.length) {
-      setProjects([]);
+      setScanned([]);
       return;
     }
     scanBusyRef.current = true;
@@ -751,7 +798,7 @@ export default function App() {
     try {
       await track("Scan des projets", "", async () => {
         const list = await api.scanProjects(sources, startCmd, cmdOverrides);
-        setProjects(list);
+        setScanned(list);
         setGitMap({}); // recharge l'état git
         const ids = await api.runningIds();
         setRunning(new Set(ids));
@@ -883,8 +930,8 @@ export default function App() {
   );
 
   useEffect(() => {
-    refreshPkgLinks(projects);
-  }, [projects, linkVersion, refreshPkgLinks]);
+    refreshPkgLinks(allProjects);
+  }, [allProjects, linkVersion, refreshPkgLinks]);
 
   // Services dont le port est occupé par un process qui n'est PAS le nôtre.
   const orphanPorts = useMemo(
@@ -991,10 +1038,16 @@ export default function App() {
   // ----- Actions -----
   const startProject = useCallback(
     async (p: Project) => {
-      if (!p.start_command) return;
+      if (!p.start_command) return; // projet non démarrable : rien à lancer
+      // La commande est relue dans la config *au moment du lancement* : une
+      // exception modifiée juste avant le clic (page de détail, modal) est prise
+      // en compte même si `p` provient encore du rendu précédent.
+      const cfg = configRef.current;
+      const command =
+        (cfg?.command_overrides?.[p.id] ?? "").trim() || cfg?.start_command || p.start_command;
       openConsole(p.id);
       try {
-        await api.startService(p.id, p.path, p.start_command, bash, p.port);
+        await api.startService(p.id, p.path, command, bash, p.port);
       } catch (e) {
         console.error(e);
       }
@@ -1023,7 +1076,7 @@ export default function App() {
   // tournait, on retire le package de node_modules, npm install, puis on relance.
   const postLink = useCallback(
     async (svcId: string, svcPath: string, depName: string, token?: StepToken) => {
-      const project = projects.find((p) => p.id === svcId);
+      const project = allProjects.find((p) => p.id === svcId);
       const wasRunning = running.has(svcId);
       const rid = () => token?.runId ?? uid();
       openConsole(svcId);
@@ -1067,7 +1120,7 @@ export default function App() {
         setBusyFor(svcId, null);
       }
     },
-    [bash, projects, running, openConsole, pushLocal],
+    [bash, allProjects, running, openConsole, pushLocal],
   );
 
   // Lie (chemin local) ou restaure (version) le package dans tous les services
@@ -1076,8 +1129,8 @@ export default function App() {
     async (p: Project, link: boolean, token?: StepToken): Promise<number> => {
       try {
         const meta = await api.readPackageJson(p.path);
-        const value = link ? `../../packages/${p.name}` : meta.version;
-        const services = await api.packageLinks(servicesForLinks(projects), meta.name);
+        const value = link ? localLinkValue(p.path) : meta.version;
+        const services = await api.packageLinks(servicesForLinks(allProjects), meta.name);
         const present = services.filter((s) => s.present);
         pushLocal(p.id, `$ ${link ? "Lier" : "Restaurer"} ${meta.name} → ${value}`, "sys");
         if (!present.length) {
@@ -1102,7 +1155,7 @@ export default function App() {
         return 1;
       }
     },
-    [projects, pushLocal, postLink],
+    [allProjects, pushLocal, postLink],
   );
 
   // Exécute une action (bash, démarrage/arrêt, tests, ou opération de package).
@@ -1357,11 +1410,11 @@ export default function App() {
   // Commande saisie manuellement dans la console d'un projet.
   const runCommandIn = useCallback(
     (target: string, command: string) => {
-      const p = projects.find((pr) => pr.id === target);
+      const p = allProjects.find((pr) => pr.id === target);
       if (!p) return;
       runActionOn(p, { id: `cmd-${uid()}`, label: command, command, kind: "bash" });
     },
-    [projects, runActionOn],
+    [allProjects, runActionOn],
   );
 
   const checkout = useCallback(
@@ -1414,7 +1467,7 @@ export default function App() {
     async (content: string) => {
       const m = envModal;
       if (!m) return;
-      const p = projects.find((x) => x.id === m.projectId);
+      const p = allProjects.find((x) => x.id === m.projectId);
       if (!p) return;
       const changed = content !== m.original;
       setEnvModal((cur) => (cur ? { ...cur, saving: true, error: undefined } : cur));
@@ -1432,7 +1485,7 @@ export default function App() {
         setEnvModal((cur) => (cur ? { ...cur, saving: false, error: String(e) } : cur));
       }
     },
-    [envModal, projects, running, pushLocal, stopProject, startProject],
+    [envModal, allProjects, running, pushLocal, stopProject, startProject],
   );
 
   // ----- Liaison package <-> service -----
@@ -1442,13 +1495,13 @@ export default function App() {
         pkg: p,
         depName: "",
         version: "",
-        folder: p.name,
+        linkValue: localLinkValue(p.path),
         services: [],
         loading: true,
       });
       try {
         const meta = await api.readPackageJson(p.path);
-        const services = await api.packageLinks(servicesForLinks(projects), meta.name);
+        const services = await api.packageLinks(servicesForLinks(allProjects), meta.name);
         setLinkModal((m) =>
           m && m.pkg.id === p.id
             ? { ...m, depName: meta.name, version: meta.version, services, loading: false }
@@ -1460,19 +1513,19 @@ export default function App() {
         );
       }
     },
-    [projects],
+    [allProjects],
   );
 
   const applyLink = useCallback(
     async (svc: ServiceDep, link: boolean) => {
       const m = linkModalRef.current;
       if (!m) return;
-      const value = link ? `../../packages/${m.folder}` : m.version;
+      const value = link ? localLinkValue(m.pkg.path) : m.version;
       setLinkBusy(svc.id);
       try {
         await api.setDepVersion(svc.path, m.depName, value);
         await postLink(svc.id, svc.path, m.depName);
-        const services = await api.packageLinks(servicesForLinks(projects), m.depName);
+        const services = await api.packageLinks(servicesForLinks(allProjects), m.depName);
         setLinkModal((cur) => (cur && cur.pkg.id === m.pkg.id ? { ...cur, services } : cur));
         setLinkVersion((v) => v + 1);
       } catch (e) {
@@ -1481,7 +1534,7 @@ export default function App() {
         setLinkBusy(null);
       }
     },
-    [projects, postLink],
+    [allProjects, postLink],
   );
 
   // ----- Séquences générales (multi-services) -----
@@ -1725,7 +1778,7 @@ export default function App() {
     if (!ws) return;
     const pid = ws.projectId;
     const conn = configRef.current?.db_connections?.[pid];
-    const p = projects.find((x) => x.id === pid);
+    const p = allProjects.find((x) => x.id === pid);
     if (!conn || !p) return;
     patchWs(pid, (s) => ({ ...s, loading: true, error: undefined }));
     const content = await api.readEnv(p.path).catch(() => "");
@@ -1740,13 +1793,21 @@ export default function App() {
     } catch (e) {
       patchWs(pid, (s) => ({ ...s, loading: false, error: String(e) }));
     }
-  }, [projects]);
+  }, [allProjects]);
 
   /** Charge (ou recharge) un onglet : page 0, avec limite et filtre donnés. */
   const loadTab = useCallback(
-    async (tabId: string, projectId: string, table: string, limit: number, filter: string) => {
+    async (
+      tabId: string,
+      projectId: string,
+      table: string,
+      limit: number,
+      filter: string,
+      orderBy: string | null = null,
+      orderDir: "asc" | "desc" = "asc",
+    ) => {
       const conn = configRef.current?.db_connections?.[projectId];
-      const p = projects.find((x) => x.id === projectId);
+      const p = allProjects.find((x) => x.id === projectId);
       if (!conn || !p) return;
       const loadId = ++dbLoadSeq.current;
       setDbTabs((ts) =>
@@ -1772,6 +1833,8 @@ export default function App() {
                   loadId,
                   limit,
                   filter,
+                  orderBy,
+                  orderDir,
                   loading: true,
                   hasMore: false,
                   loadingMore: false,
@@ -1806,6 +1869,8 @@ export default function App() {
           limit,
           0,
           filter,
+          orderBy ?? undefined,
+          orderDir,
         );
         applyFresh((d) => ({
           ...d,
@@ -1824,7 +1889,7 @@ export default function App() {
         applyFresh((d) => ({ ...d, loading: false, error: String(e) }));
       }
     },
-    [projects],
+    [allProjects],
   );
 
   /** Ouvre une table dans un onglet (ou réactive l'onglet existant). */
@@ -1859,6 +1924,8 @@ export default function App() {
         loadId: 0,
         limit,
         filter: "",
+        orderBy: null,
+        orderDir: "asc",
         loading: true,
         hasMore: false,
         loadingMore: false,
@@ -1880,7 +1947,7 @@ export default function App() {
       if (!tab) return;
       const { projectId, table } = tab.data;
       const conn = configRef.current?.db_connections?.[projectId];
-      const p = projects.find((x) => x.id === projectId);
+      const p = allProjects.find((x) => x.id === projectId);
       if (!conn || !p || !table) return;
       // `schema.table` identifie le chargement en cours : un second chargement
       // (autre table) le remplace et rend obsolètes les patchs du premier.
@@ -1914,7 +1981,7 @@ export default function App() {
         patch((s) => ({ ...s, loading: false, error: String(e) }));
       }
     },
-    [projects],
+    [allProjects],
   );
 
   /** Charge le graphe des clés étrangères de la base (une seule lecture, quel
@@ -1924,7 +1991,7 @@ export default function App() {
     if (!ws) return;
     const pid = ws.projectId;
     const conn = configRef.current?.db_connections?.[pid];
-    const p = projects.find((x) => x.id === pid);
+    const p = allProjects.find((x) => x.id === pid);
     if (!conn || !p) return;
     setDbGraph((g) => ({ ...g, loading: true, error: undefined }), pid);
     const content = await api.readEnv(p.path).catch(() => "");
@@ -1946,7 +2013,7 @@ export default function App() {
     } catch (e) {
       setDbGraph((g) => ({ ...g, loading: false, error: String(e) }), pid);
     }
-  }, [projects]);
+  }, [allProjects]);
 
   /** Enregistre la disposition du schéma d'un projet (positions + courbures). */
   const saveGraphLayout = useCallback(
@@ -1981,7 +2048,7 @@ export default function App() {
       const hit = colCacheRef.current.get(cacheKey);
       if (hit) return hit;
       const conn = configRef.current?.db_connections?.[ws.projectId];
-      const p = projects.find((x) => x.id === ws.projectId);
+      const p = allProjects.find((x) => x.id === ws.projectId);
       if (!conn || !p) return [];
       const content = await api.readEnv(p.path).catch(() => "");
       const v = resolveDbValues(conn, parseEnv(content));
@@ -2002,7 +2069,7 @@ export default function App() {
         return [];
       }
     },
-    [projects],
+    [allProjects],
   );
 
   /** Applique les modifications de structure d'un onglet (ALTER TABLE). */
@@ -2015,7 +2082,7 @@ export default function App() {
       if (!tab) return { ok: false, message: "Onglet fermé." };
       const { projectId, table, limit, filter } = tab.data;
       const conn = configRef.current?.db_connections?.[projectId];
-      const p = projects.find((x) => x.id === projectId);
+      const p = allProjects.find((x) => x.id === projectId);
       if (!conn || !p) return { ok: false, message: "Service introuvable." };
       const content = await api.readEnv(p.path).catch(() => "");
       const v = resolveDbValues(conn, parseEnv(content));
@@ -2048,7 +2115,7 @@ export default function App() {
         return { ok: false, message: String(e) };
       }
     },
-    [projects, loadTabSchema, loadTab, pushLocal, loadDbGraph],
+    [allProjects, loadTabSchema, loadTab, pushLocal, loadDbGraph],
   );
 
   /** Bascule entre les sous-onglets d'une table ; charge la structure au besoin. */
@@ -2145,10 +2212,10 @@ export default function App() {
       const d = tab.data;
       if (d.loading || d.loadingMore || !d.hasMore || loadingMoreRef.current) return;
       const conn = configRef.current?.db_connections?.[d.projectId];
-      const p = projects.find((x) => x.id === d.projectId);
+      const p = allProjects.find((x) => x.id === d.projectId);
       if (!conn || !p) return;
       loadingMoreRef.current = true;
-      const { table, filter, limit, loadId } = d;
+      const { table, filter, limit, loadId, orderBy, orderDir } = d;
       const offset = d.rows.length;
       setDbTabs((ts) =>
         ts.map((t) => (t.id === tabId ? { ...t, data: { ...t.data, loadingMore: true } } : t)),
@@ -2180,6 +2247,8 @@ export default function App() {
           limit,
           offset,
           filter,
+          orderBy ?? undefined,
+          orderDir,
         );
         applyFresh((x) => ({
           ...x,
@@ -2193,7 +2262,7 @@ export default function App() {
         loadingMoreRef.current = false;
       }
     },
-    [dbTabs, projects],
+    [dbTabs, allProjects],
   );
 
   /** Change la taille de page (persistée en config) et recharge l'onglet. */
@@ -2203,7 +2272,8 @@ export default function App() {
       if (!tab) return;
       const cfg = configRef.current;
       if (cfg && cfg.db_row_limit !== limit) void persist({ ...cfg, db_row_limit: limit });
-      void loadTab(tabId, tab.data.projectId, tab.data.table, limit, tab.data.filter);
+      const d = tab.data;
+      void loadTab(tabId, d.projectId, d.table, limit, d.filter, d.orderBy, d.orderDir);
     },
     [dbTabs, persist, loadTab],
   );
@@ -2212,7 +2282,19 @@ export default function App() {
     (tabId: string, filter: string) => {
       const tab = dbTabs.find((t) => t.id === tabId);
       if (!tab) return;
-      void loadTab(tabId, tab.data.projectId, tab.data.table, tab.data.limit, filter);
+      const d = tab.data;
+      void loadTab(tabId, d.projectId, d.table, d.limit, filter, d.orderBy, d.orderDir);
+    },
+    [dbTabs, loadTab],
+  );
+
+  /** Change le tri (ORDER BY côté serveur) et recharge l'onglet depuis la page 0. */
+  const changeTabSort = useCallback(
+    (tabId: string, orderBy: string | null, orderDir: "asc" | "desc") => {
+      const tab = dbTabs.find((t) => t.id === tabId);
+      if (!tab) return;
+      const d = tab.data;
+      void loadTab(tabId, d.projectId, d.table, d.limit, d.filter, orderBy, orderDir);
     },
     [dbTabs, loadTab],
   );
@@ -2221,7 +2303,8 @@ export default function App() {
     (tabId: string) => {
       const tab = dbTabs.find((t) => t.id === tabId);
       if (!tab) return;
-      void loadTab(tabId, tab.data.projectId, tab.data.table, tab.data.limit, tab.data.filter);
+      const d = tab.data;
+      void loadTab(tabId, d.projectId, d.table, d.limit, d.filter, d.orderBy, d.orderDir);
     },
     [dbTabs, loadTab],
   );
@@ -2276,7 +2359,7 @@ export default function App() {
       if (inserts.length === 0 && updates.length === 0 && deletes.length === 0)
         return { ok: true, message: "Rien à enregistrer." };
       const conn = configRef.current?.db_connections?.[cur.projectId];
-      const p = projects.find((x) => x.id === cur.projectId);
+      const p = allProjects.find((x) => x.id === cur.projectId);
       if (!conn || !p) return { ok: false, message: "Service introuvable." };
       const content = await api.readEnv(p.path).catch(() => "");
       const v = resolveDbValues(conn, parseEnv(content));
@@ -2303,7 +2386,7 @@ export default function App() {
         return { ok: false, message: String(e) };
       }
     },
-    [dbTabs, projects, loadTab, pushLocal],
+    [dbTabs, allProjects, loadTab, pushLocal],
   );
   const onSetupSubmit = useCallback(
     async (srcs: ProjectSource[], b: string, cmd: string) => {
@@ -3452,6 +3535,7 @@ export default function App() {
                     active={visible && !graphOpenThis && t.id === activeTabThis && t.view === "data"}
                     onLimitChange={(n) => changeTabLimit(t.id, n)}
                     onFilterChange={(f) => changeTabFilter(t.id, f)}
+                    onSort={(col, dir) => changeTabSort(t.id, col, dir)}
                     onRefresh={() => refreshTab(t.id)}
                     onApply={(ins, upd, del) => applyTabChanges(t.id, ins, upd, del)}
                     onLoadMore={() => loadMoreTab(t.id)}
@@ -3587,7 +3671,7 @@ export default function App() {
       {generalSeq && (
         <GeneralSequenceModal
           sequence={generalSeq}
-          projects={projects}
+          projects={allProjects}
           actions={allActions}
           sequences={sequences}
           onRun={(ids, branch) => {

@@ -1927,8 +1927,21 @@ async fn save_env(path: String, content: String) -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Une dépendance pointe-t-elle vers un dossier local (lien) plutôt que vers une
+/// version publiée ? `file:<chemin absolu>` est ce que pose l'application ; les
+/// autres formes couvrent les liens posés à la main ou par une ancienne version
+/// (chemins relatifs, chemin absolu nu — « C:\… », « C:/… » ou « /… »).
 fn is_linked_value(v: &str) -> bool {
-    v.starts_with("file:") || v.starts_with("..") || v.starts_with("./") || v.contains("packages/")
+    let abs_win = {
+        let b = v.as_bytes();
+        b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'/' || b[2] == b'\\')
+    };
+    v.starts_with("file:")
+        || v.starts_with("..")
+        || v.starts_with("./")
+        || v.starts_with('/')
+        || abs_win
+        || v.contains("packages/")
 }
 
 fn dep_lookup(pkg: &Path, dep: &str) -> (bool, Option<String>, Option<String>) {
@@ -2710,19 +2723,88 @@ async fn db_table_rows(
     limit: u32,
     offset: u32,
     filter: String,
+    order_by: Option<String>,
+    order_dir: Option<String>,
 ) -> Result<TableData, String> {
     let limit = limit.clamp(1, 100_000);
     tauri::async_runtime::spawn_blocking(move || match driver.as_str() {
-        "postgres" => {
-            pg_table_rows(&host, port, &user, &password, &database, &table, limit, offset, &filter)
-        }
-        "mariadb" | "mysql" => {
-            my_table_rows(&host, port, &user, &password, &database, &table, limit, offset, &filter)
-        }
+        "postgres" => pg_table_rows(
+            &host, port, &user, &password, &database, &table, limit, offset, &filter, &order_by,
+            &order_dir,
+        ),
+        "mariadb" | "mysql" => my_table_rows(
+            &host, port, &user, &password, &database, &table, limit, offset, &filter, &order_by,
+            &order_dir,
+        ),
         other => Err(format!("Pilote inconnu : {other}")),
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Construit la clause `ORDER BY` sécurisée : la colonne demandée doit exister
+/// dans `cols` (comparaison exacte sur le nom) sinon elle est ignorée. Renvoie
+/// « » si aucun tri valide.
+///
+/// Postgres : la colonne est **qualifiée par la table** (`table."col"`). Sans
+/// cela, `ORDER BY "col"` se lierait à la colonne de sortie du SELECT — qui est
+/// castée en `::text` pour l'affichage — et trierait donc tout façon chaîne
+/// (1, 10, 100…), y compris les colonnes numériques. La qualification force la
+/// liaison sur la vraie colonne typée.
+///
+/// Tri « naturel » des colonnes textuelles : une colonne de type caractère peut
+/// contenir des nombres (« 1 », « 2 », « 11 »). Un ORDER BY brut les classerait
+/// façon chaîne (1, 11, 2). Pour ces colonnes, on trie d'abord par valeur
+/// numérique quand le contenu est un nombre, puis par texte en repli — les
+/// colonnes déjà numériques/booléennes/dates gardent leur tri natif.
+fn build_order_by(
+    cols: &[ColInfo],
+    order_by: &Option<String>,
+    order_dir: &Option<String>,
+    driver: FDriver,
+    table_ref: &str,
+) -> String {
+    let col = match order_by {
+        Some(c) => match cols.iter().find(|x| &x.name == c) {
+            Some(ci) => ci,
+            None => return String::new(),
+        },
+        None => return String::new(),
+    };
+    let dir = match order_dir.as_deref() {
+        Some(d) if d.eq_ignore_ascii_case("desc") => "DESC",
+        _ => "ASC",
+    };
+    let is_text = matches!(col.kind, ColKind::Text);
+    match driver {
+        FDriver::Pg => {
+            // Référence qualifiée : {table}."col" → vraie colonne typée.
+            let q = format!("{table_ref}.\"{}\"", col.name.replace('"', "\"\""));
+            if is_text {
+                // Cast en texte avant le test : sûr même pour un type non-texte
+                // rangé en catégorie « texte » (dates, uuid…), qui retombent
+                // alors sur un tri lexicographique (chronologique pour l'ISO).
+                format!(
+                    " ORDER BY CASE WHEN {q}::text ~ '^[[:space:]]*-?[0-9]+([.][0-9]+)?[[:space:]]*$' \
+                     THEN ({q}::text)::numeric END {dir} NULLS LAST, {q}::text {dir}"
+                )
+            } else {
+                format!(" ORDER BY {q} {dir}")
+            }
+        }
+        FDriver::My => {
+            // MySQL fait « SELECT * » (pas de cast) : la vraie colonne est déjà
+            // référencée, pas besoin de qualifier.
+            let q = format!("`{}`", col.name.replace('`', "``"));
+            if is_text {
+                // « col + 0 » convertit les chaînes numériques en nombre
+                // (non numérique → 0), puis départage par texte.
+                format!(" ORDER BY ({q} + 0) {dir}, {q} {dir}")
+            } else {
+                format!(" ORDER BY {q} {dir}")
+            }
+        }
+    }
 }
 
 /// Qualifie un nom de table Postgres (« schema.name » ou « name ») en identifiant
@@ -2746,6 +2828,8 @@ fn pg_table_rows(
     limit: u32,
     offset: u32,
     filter: &str,
+    order_by: &Option<String>,
+    order_dir: &Option<String>,
 ) -> Result<TableData, String> {
     let mut client = pg_client(host, port, user, password, database)?;
     let qualified = pg_qualify(table);
@@ -2841,8 +2925,10 @@ fn pg_table_rows(
     } else {
         format!(" WHERE {where_sql}")
     };
-    let sql =
-        format!("SELECT {cols_sql} FROM {qualified}{where_clause} LIMIT {limit} OFFSET {offset}");
+    let order_clause = build_order_by(&cols_info, order_by, order_dir, FDriver::Pg, &qualified);
+    let sql = format!(
+        "SELECT {cols_sql} FROM {qualified}{where_clause}{order_clause} LIMIT {limit} OFFSET {offset}"
+    );
     let param_refs: Vec<&(dyn postgres::types::ToSql + Sync)> =
         params.iter().map(|s| s as &(dyn postgres::types::ToSql + Sync)).collect();
     let rows = client
@@ -2888,6 +2974,8 @@ fn my_table_rows(
     limit: u32,
     offset: u32,
     filter: &str,
+    order_by: &Option<String>,
+    order_dir: &Option<String>,
 ) -> Result<TableData, String> {
     use mysql::prelude::Queryable;
     let mut conn = my_conn(host, port, user, password, database)?;
@@ -2959,7 +3047,9 @@ fn my_table_rows(
     } else {
         format!(" WHERE {where_sql}")
     };
-    let sql = format!("SELECT * FROM {quoted}{where_clause} LIMIT {limit} OFFSET {offset}");
+    let order_clause = build_order_by(&cols_info, order_by, order_dir, FDriver::My, "");
+    let sql =
+        format!("SELECT * FROM {quoted}{where_clause}{order_clause} LIMIT {limit} OFFSET {offset}");
     let my_params = if params.is_empty() {
         mysql::Params::Empty
     } else {

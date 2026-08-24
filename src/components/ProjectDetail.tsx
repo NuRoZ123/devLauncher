@@ -65,6 +65,10 @@ export function ProjectDetail({
   hiddenRepoActions,
   onToggleRepoAction,
 }: Props) {
+  // Sous-projet d'un fullstack (id "fullstack:<projet>:back|front|common") : son
+  // type vient de sa place dans le projet, pas d'une source — le reclasser
+  // n'aurait aucun effet sur le scan et casserait son id (donc ses réglages).
+  const isFullstackChild = project.id.startsWith("fullstack:");
   const cmdOverride = config.command_overrides?.[project.id] ?? "";
   const repoOverride = config.project_links?.[project.id] ?? "";
   const [cmdDraft, setCmdDraft] = useState(cmdOverride);
@@ -97,21 +101,31 @@ export function ProjectDetail({
 
         <section className="detail-section">
           <h2>Type</h2>
-          <div className="seg">
-            {KINDS.map((k) => (
-              <button
-                key={k}
-                className={"btn btn-sm" + (project.kind === k ? " btn-primary" : "")}
-                onClick={() => onChangeType(project, k)}
-              >
-                {KIND_LABEL[k]}
-              </button>
-            ))}
-          </div>
-          <small className="muted">
-            Reclasse le projet (met à jour sa source). Les réglages liés (commande, lien, base de
-            données) sont conservés.
-          </small>
+          {isFullstackChild ? (
+            <small className="muted">
+              Sous-projet d'un projet full-stack : son type ({KIND_LABEL[project.kind]}) découle de
+              sa place dans le projet et n'est pas modifiable ici. Les dossiers back / front se
+              règlent sur la source du projet (Réglages → Projets).
+            </small>
+          ) : (
+            <>
+              <div className="seg">
+                {KINDS.map((k) => (
+                  <button
+                    key={k}
+                    className={"btn btn-sm" + (project.kind === k ? " btn-primary" : "")}
+                    onClick={() => onChangeType(project, k)}
+                  >
+                    {KIND_LABEL[k]}
+                  </button>
+                ))}
+              </div>
+              <small className="muted">
+                Reclasse le projet (met à jour sa source). Les réglages liés (commande, lien, base
+                de données) sont conservés.
+              </small>
+            </>
+          )}
         </section>
 
         <section className="detail-section">
@@ -131,6 +145,11 @@ export function ProjectDetail({
                     onChange={(e) => setCmdDraft(e.target.value)}
                     placeholder={config.start_command || "npm run start"}
                     onBlur={() => onSaveCommand(project, cmdDraft.trim() || null)}
+                    onKeyDown={(e) => {
+                      // Entrée = enregistrer tout de suite (sinon il faut sortir
+                      // du champ pour que la commande soit prise en compte).
+                      if (e.key === "Enter") e.currentTarget.blur();
+                    }}
                   />
                   {running ? (
                     <button className="btn btn-stop" onClick={() => onStop(project)}>

@@ -119,7 +119,8 @@ export const api = {
   ) =>
     invoke<string[]>("db_tables", { driver, host, port, user, password, database }),
 
-  /** Lit les premières lignes d'une table (bornées par `limit`). */
+  /** Lit les premières lignes d'une table (bornées par `limit`). Tri optionnel
+   *  par `orderBy` (nom de colonne) dans le sens `orderDir` (asc / desc). */
   dbTableRows: (
     driver: DbDriver,
     host: string,
@@ -131,6 +132,8 @@ export const api = {
     limit: number,
     offset: number,
     filter: string,
+    orderBy?: string,
+    orderDir?: "asc" | "desc",
   ) =>
     invoke<DbTableData>("db_table_rows", {
       driver,
@@ -143,6 +146,8 @@ export const api = {
       limit,
       offset,
       filter,
+      orderBy: orderBy ?? null,
+      orderDir: orderDir ?? null,
     }),
 
   /** Lit la structure d'une table : colonnes, index et contraintes. */

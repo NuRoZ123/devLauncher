@@ -2426,6 +2426,27 @@ button.db-table {
   white-space: nowrap;
   vertical-align: bottom;
 }
+/* En-tête triable : clic pour cycler asc → desc → aucun. */
+.dbdata-th-sort {
+  cursor: pointer;
+  user-select: none;
+  padding-right: 18px;
+  position: relative;
+}
+.dbdata-th-sort:hover {
+  background: var(--panel-3, rgba(79, 140, 255, 0.12));
+}
+.dbdata-table thead th.dbdata-sorted {
+  color: var(--accent, #4f8cff);
+}
+.dbdata-sort-ind {
+  position: absolute;
+  right: 5px;
+  bottom: 6px;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--accent, #4f8cff);
+}
 .dbdata-col-name {
   display: block;
 }
@@ -3436,6 +3457,9 @@ button.db-table {
 }
 .link-paths code {
   font-size: 0.9em;
+  /* Chemin absolu du package : peut être long, on le laisse passer à la ligne
+     plutôt que d'élargir la modale. */
+  overflow-wrap: anywhere;
 }
 .link-list {
   max-height: 50vh;
