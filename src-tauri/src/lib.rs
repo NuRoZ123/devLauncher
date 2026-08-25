@@ -2579,6 +2579,12 @@ fn fcmp_lhs(driver: FDriver, col: &ColInfo) -> String {
     }
 }
 
+/// Le token en position `i` est-il l'un des mots-clés donnés (casse ignorée) ?
+/// Sert à distinguer « NOT IN » de « NOT LIKE » avant d'entrer dans la branche.
+fn fkw_at(toks: &[Tok], i: usize, kws: &[&str]) -> bool {
+    matches!(toks.get(i), Some(Tok::Ident(k)) if kws.iter().any(|w| k.eq_ignore_ascii_case(w)))
+}
+
 /// Construit la clause WHERE (sans le mot « WHERE ») et les paramètres liés.
 /// La comparaison est choisie d'après le type SQL de la colonne (`ColInfo`) :
 /// numérique/booléen → comparaison typée (ordre correct), texte → lexicographique.
@@ -2631,15 +2637,13 @@ fn build_where(
                 sql.push_str(if not { " IS NOT NULL" } else { " IS NULL" });
             }
             Some(Tok::Ident(kw))
-                if kw.eq_ignore_ascii_case("in") || kw.eq_ignore_ascii_case("not") =>
+                if kw.eq_ignore_ascii_case("in")
+                    || (kw.eq_ignore_ascii_case("not") && fkw_at(&toks, p + 1, &["in"])) =>
             {
                 let is_not = kw.eq_ignore_ascii_case("not");
                 p += 1;
                 if is_not {
-                    match toks.get(p) {
-                        Some(Tok::Ident(i)) if i.eq_ignore_ascii_case("in") => p += 1,
-                        _ => return Err("IN attendu après NOT".into()),
-                    }
+                    p += 1; // le « IN » qui suit le NOT (vérifié par la garde)
                 }
                 match toks.get(p) {
                     Some(Tok::Op(o)) if o == "(" => p += 1,
@@ -2665,7 +2669,17 @@ fn build_where(
                 sql.push_str(&placeholders.join(", "));
                 sql.push(')');
             }
-            Some(Tok::Ident(kw)) if kw.eq_ignore_ascii_case("like") => {
+            Some(Tok::Ident(kw))
+                if kw.eq_ignore_ascii_case("like")
+                    || kw.eq_ignore_ascii_case("ilike")
+                    || (kw.eq_ignore_ascii_case("not")
+                        && fkw_at(&toks, p + 1, &["like", "ilike"])) =>
+            {
+                let is_not = kw.eq_ignore_ascii_case("not");
+                if is_not {
+                    p += 1; // on passe au LIKE / ILIKE (vérifié par la garde)
+                }
+                let insensitive = fkw_at(&toks, p, &["ilike"]);
                 p += 1;
                 let v = fparse_value(toks.get(p))?;
                 p += 1;
@@ -2674,9 +2688,27 @@ fn build_where(
                     FVal::Num(s) | FVal::Str(s) => s,
                     FVal::Bool(b) => if b { "true" } else { "false" }.to_string(),
                 });
-                sql.push_str(&fcast_col(driver, &col.name));
-                sql.push_str(" LIKE ");
-                sql.push_str(&fplaceholder(driver, params.len()));
+                let lhs = fcast_col(driver, &col.name);
+                let ph = fplaceholder(driver, params.len());
+                // ILIKE (insensible à la casse) est natif sous Postgres. MySQL /
+                // MariaDB ne le connaît pas — son LIKE suit la collation de la
+                // colonne, insensible à la casse le plus souvent mais pas
+                // toujours : on met les deux côtés en minuscules pour que le
+                // résultat soit le même quelle que soit la collation.
+                if insensitive && matches!(driver, FDriver::My) {
+                    sql.push_str(&format!("LOWER({lhs})"));
+                    sql.push_str(if is_not { " NOT LIKE " } else { " LIKE " });
+                    sql.push_str(&format!("LOWER({ph})"));
+                } else {
+                    sql.push_str(&lhs);
+                    sql.push_str(match (insensitive, is_not) {
+                        (true, true) => " NOT ILIKE ",
+                        (true, false) => " ILIKE ",
+                        (false, true) => " NOT LIKE ",
+                        (false, false) => " LIKE ",
+                    });
+                    sql.push_str(&ph);
+                }
             }
             Some(Tok::Op(o))
                 if matches!(o.as_str(), "=" | "!=" | "<>" | "<" | "<=" | ">" | ">=") =>
@@ -2689,7 +2721,9 @@ fn build_where(
             }
             _ => {
                 return Err(
-                    "Opérateur attendu : =, !=, <, <=, >, >=, IN, LIKE ou IS NULL".into(),
+                    "Opérateur attendu : =, !=, <, <=, >, >=, IN, NOT IN, LIKE, ILIKE, \
+                     NOT LIKE, NOT ILIKE ou IS [NOT] NULL"
+                        .into(),
                 )
             }
         }

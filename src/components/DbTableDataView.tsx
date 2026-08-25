@@ -697,7 +697,14 @@ export function DbTableDataView({
         <div className="dbdata-toolbar">
           <input
             className="dbdata-filter"
-            placeholder="Filtrer :  id = 1   ·   id in (1,2,3) AND softDelete = false   ·   name LIKE 'a%'"
+            placeholder="Filtrer :  id = 1   ·   id in (1,2,3) AND softDelete = false   ·   name ILIKE '%a%'"
+            title={
+              "Opérateurs : =, !=, <, <=, >, >=\n" +
+              "IN (…) / NOT IN (…)\n" +
+              "LIKE / NOT LIKE (sensible à la casse), ILIKE / NOT ILIKE (insensible)\n" +
+              "IS NULL / IS NOT NULL\n" +
+              "Conditions enchaînées par AND / OR."
+            }
             spellCheck={false}
             autoCapitalize="off"
             autoCorrect="off"
