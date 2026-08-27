@@ -780,12 +780,21 @@ input[type="checkbox"]:disabled {
 .fs-chevron.open {
   transform: rotate(90deg);
 }
-/* Sous-projet d'un fullstack : indenté, avec un liseré rappelant le rattachement. */
+/* Sous-projet d'un fullstack : indenté, avec un liseré rappelant le rattachement.
+   Les sous-lignes s'empilent comme un seul bloc : coins carrés, bordures
+   mitoyennes fusionnées (margin-top négatif), et seule la dernière referme
+   l'arrondi en bas — sinon un coin arrondi vient buter contre le coin carré de
+   la ligne suivante. */
 .project-row-nested {
   margin-left: 22px;
+  margin-top: -1px;
   border-left: 2px solid var(--border);
-  border-top-left-radius: 0;
+  border-radius: 0;
   background: var(--panel-2, var(--panel));
+}
+.project-row-nested:last-child {
+  border-bottom-left-radius: var(--radius);
+  border-bottom-right-radius: var(--radius);
 }
 
 .project-sub {

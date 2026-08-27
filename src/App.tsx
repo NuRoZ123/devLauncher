@@ -1398,6 +1398,23 @@ export default function App() {
     },
     [resolveAction, runActionOn],
   );
+  // Ligne fullstack : démarre / arrête tous ses sous-projets d'un coup, en
+  // passant par le même chemin qu'un clic sur chaque ligne (action « start » /
+  // « stop » résolue, console ouverte, file d'attente).
+  const onStartGroup = useCallback(
+    (p: Project) => {
+      (p.children ?? [])
+        .filter((c) => c.start_command && !running.has(c.id) && !busy[c.id])
+        .forEach((c) => onStartRow(c));
+    },
+    [running, busy, onStartRow],
+  );
+  const onStopGroup = useCallback(
+    (p: Project) => {
+      (p.children ?? []).filter((c) => running.has(c.id)).forEach((c) => onStopRow(c));
+    },
+    [running, onStopRow],
+  );
   const onRunTestsRow = useCallback(
     (p: Project) => {
       const a = resolveAction("test");
@@ -2862,7 +2879,11 @@ export default function App() {
 
   // Rend une ligne de projet. `nested` = sous-projet d'un fullstack (indenté,
   // sans chip branche ni bouton dépôt : git géré au niveau du parent).
-  const renderRow = (p: Project, nested = false) => (
+  const renderRow = (p: Project, nested = false) => {
+    // (fullstack) état agrégé des sous-projets : alimente les boutons de groupe.
+    const kids = p.kind === "fullstack" ? p.children ?? [] : [];
+    const startableKids = kids.filter((c) => c.start_command);
+    return (
     <ProjectRow
       key={p.id}
       project={p}
@@ -2905,8 +2926,14 @@ export default function App() {
       nested={nested}
       expanded={expandedRows.has(p.id)}
       onToggleExpand={toggleExpanded}
+      groupStartable={startableKids.length}
+      groupRunning={startableKids.filter((c) => running.has(c.id)).length}
+      groupBusy={kids.some((c) => !!busy[c.id])}
+      onStartGroup={onStartGroup}
+      onStopGroup={onStopGroup}
     />
-  );
+    );
+  };
 
   // Rend une ligne de projet triable (dnd-kit) : poignée « grip » + la ligne
   // (un projet fullstack embarque ses enfants). Le conteneur (racine/dossier) est

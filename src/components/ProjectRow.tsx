@@ -75,6 +75,16 @@ interface Props {
   expanded?: boolean;
   /** (fullstack) Bascule l'affichage des sous-projets (clic sur le chevron/nom). */
   onToggleExpand?: (p: Project) => void;
+  /** (fullstack) Nombre de sous-projets démarrables. */
+  groupStartable?: number;
+  /** (fullstack) Nombre de sous-projets actuellement lancés. */
+  groupRunning?: number;
+  /** (fullstack) true = au moins un sous-projet a une action en cours. */
+  groupBusy?: boolean;
+  /** (fullstack) Démarre tous les sous-projets à l'arrêt. */
+  onStartGroup?: (p: Project) => void;
+  /** (fullstack) Arrête tous les sous-projets lancés. */
+  onStopGroup?: (p: Project) => void;
 }
 
 /** Icône base de données (cylindre), hérite de la couleur du bouton. */
@@ -276,6 +286,11 @@ export const ProjectRow = memo(function ProjectRow({
   nested,
   expanded,
   onToggleExpand,
+  groupStartable = 0,
+  groupRunning = 0,
+  groupBusy,
+  onStartGroup,
+  onStopGroup,
 }: Props) {
   const isFullstack = project.kind === "fullstack";
   const startable = project.start_command != null;
@@ -886,6 +901,39 @@ export const ProjectRow = memo(function ProjectRow({
               </button>
             );
           })()}
+
+        {/* Ligne fullstack : pilote ses sous-projets d'un seul geste. Les deux
+            boutons coexistent quand le groupe est lancé à moitié. */}
+        {isFullstack && groupStartable > 0 && (
+          <>
+            {groupRunning > 0 && (
+              <button
+                className="btn btn-stop btn-sm btn-ico"
+                disabled={groupBusy}
+                onClick={() => onStopGroup?.(project)}
+                title={`Arrêter les sous-projets lancés (${groupRunning})`}
+                aria-label="Arrêter les sous-projets"
+              >
+                <StopIcon />
+              </button>
+            )}
+            {groupRunning < groupStartable && (
+              <button
+                className="btn btn-start btn-sm btn-ico"
+                disabled={groupBusy}
+                onClick={() => onStartGroup?.(project)}
+                title={
+                  groupRunning > 0
+                    ? `Démarrer les sous-projets restants (${groupStartable - groupRunning})`
+                    : `Démarrer les ${groupStartable} sous-projets`
+                }
+                aria-label="Démarrer les sous-projets"
+              >
+                <PlayIcon />
+              </button>
+            )}
+          </>
+        )}
 
         {startable ? (
           running ? (
