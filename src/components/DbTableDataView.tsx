@@ -74,7 +74,7 @@ const PRESETS = [50, 100, 200, 500, 1000, 5000];
 const TRUE_VALUES = ["1", "true", "t", "yes", "y", "on"];
 
 // Convertit une valeur SQL (texte) vers le format attendu par le champ HTML.
-function toInputValue(editor: DbEditor, val: string): string {
+export function toInputValue(editor: DbEditor, val: string): string {
   if (editor === "bool") return TRUE_VALUES.includes(val.trim().toLowerCase()) ? "1" : "0";
   if (editor === "date") return val.slice(0, 10);
   if (editor === "time") return val.slice(0, 8);
@@ -83,7 +83,7 @@ function toInputValue(editor: DbEditor, val: string): string {
 }
 
 // Reconvertit la valeur du champ HTML vers le format attendu par la base.
-function fromInputValue(editor: DbEditor, val: string): string {
+export function fromInputValue(editor: DbEditor, val: string): string {
   if (editor === "datetime") return val.replace("T", " ");
   return val;
 }

@@ -2115,6 +2115,481 @@ async fn db_tables(
     .map_err(|e| e.to_string())?
 }
 
+/// Métadonnées réelles d'une colonne de résultat (lues côté serveur).
+#[derive(Serialize, Clone, Default)]
+struct SqlColumn {
+    /// Nom tel que renvoyé (alias compris).
+    name: String,
+    /// Type complet lisible : « character varying(255) », « int(11) unsigned »…
+    full_type: String,
+    /// Type de base : « varchar », « int4 »…
+    base_type: String,
+    /// Éditeur adapté : text, number, bool, enum, date, time, datetime.
+    editor: String,
+    /// Valeurs possibles d'un enum (vide sinon).
+    enum_values: Vec<String>,
+    /// NULL autorisé (None = inconnu : colonne calculée).
+    nullable: Option<bool>,
+    /// Colonne de la clé primaire de sa table d'origine.
+    primary_key: bool,
+    /// Table d'origine (None = expression, agrégat…), au format attendu par
+    /// les commandes d'écriture (« schema.table » hors public sous Postgres).
+    table: Option<String>,
+    /// Nom réel de la colonne dans la table d'origine (sans alias).
+    origin: Option<String>,
+}
+
+/// Clé primaire complète d'une table touchée par un résultat.
+#[derive(Serialize, Clone)]
+struct SqlTablePk {
+    table: String,
+    pk: Vec<String>,
+}
+
+/// Résultat d'une instruction exécutée par l'interpréteur SQL brut.
+#[derive(Serialize, Default)]
+struct SqlResult {
+    /// Texte de l'instruction (Postgres ; vide sous MariaDB, découpé par le serveur).
+    statement: String,
+    columns: Vec<SqlColumn>,
+    /// Lignes (texte ou `null`), bornées à `SQL_MAX_ROWS`.
+    rows: Vec<Vec<Option<String>>>,
+    /// true = l'instruction renvoie des lignes (SELECT, SHOW, RETURNING…).
+    has_rows: bool,
+    /// Lignes affectées (ou lues) selon le serveur.
+    affected: u64,
+    /// true = plus de lignes que `SQL_MAX_ROWS`, la suite est ignorée.
+    truncated: bool,
+    /// Clés primaires des tables d'origine des colonnes.
+    tables: Vec<SqlTablePk>,
+    /// Erreur de cette instruction : l'exécution s'arrête là.
+    error: Option<String>,
+}
+
+const SQL_MAX_ROWS: usize = 5000;
+
+/// Interpréteur SQL brut : exécute le script (plusieurs instructions séparées
+/// par « ; » acceptées) et renvoie un résultat par instruction, typé.
+#[tauri::command]
+async fn db_query(
+    driver: String,
+    host: String,
+    port: u16,
+    user: String,
+    password: String,
+    database: String,
+    sql: String,
+) -> Result<Vec<SqlResult>, String> {
+    tauri::async_runtime::spawn_blocking(move || match driver.as_str() {
+        "postgres" => pg_query(&host, port, &user, &password, &database, &sql),
+        "mariadb" | "mysql" => my_query(&host, port, &user, &password, &database, &sql),
+        other => Err(format!("Pilote inconnu : {other}")),
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Découpe un script Postgres en instructions : « ; » hors chaînes, identifiants
+/// cités, chaînes dollar ($$…$$, $tag$…$tag$) et commentaires.
+fn split_sql(sql: &str) -> Vec<String> {
+    let b: Vec<char> = sql.chars().collect();
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        let n = b.get(i + 1).copied();
+        let end = if c == '-' && n == Some('-') {
+            (i..b.len()).find(|&j| b[j] == '\n').unwrap_or(b.len())
+        } else if c == '/' && n == Some('*') {
+            (i + 2..b.len().saturating_sub(1))
+                .find(|&j| b[j] == '*' && b[j + 1] == '/')
+                .map(|j| j + 2)
+                .unwrap_or(b.len())
+        } else if c == '\'' || c == '"' {
+            let mut j = i + 1;
+            while j < b.len() {
+                if b[j] == c && b.get(j + 1) == Some(&c) {
+                    j += 2;
+                } else if b[j] == c {
+                    break;
+                } else {
+                    j += 1;
+                }
+            }
+            (j + 1).min(b.len())
+        } else if c == '$' {
+            // Chaîne dollar : $tag$ … $tag$ (tag vide ou identifiant ; $1 = paramètre).
+            let mut j = i + 1;
+            while j < b.len() && (b[j].is_alphanumeric() || b[j] == '_') {
+                j += 1;
+            }
+            let is_tag = j < b.len() && b[j] == '$' && !(j > i + 1 && b[i + 1].is_ascii_digit());
+            if is_tag {
+                let tag = &b[i..=j];
+                let body = j + 1;
+                (body..b.len())
+                    .find(|&k| b[k..].starts_with(tag))
+                    .map(|k| k + tag.len())
+                    .unwrap_or(b.len())
+            } else {
+                i + 1
+            }
+        } else if c == ';' {
+            out.push(std::mem::take(&mut cur));
+            i += 1;
+            continue;
+        } else {
+            i + 1
+        };
+        cur.extend(&b[i..end]);
+        i = end;
+    }
+    out.push(cur);
+    out.into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| {
+            // Ignore les morceaux vides ou faits uniquement de commentaires.
+            let mut rest = s.as_str();
+            loop {
+                rest = rest.trim_start();
+                if let Some(r) = rest.strip_prefix("--") {
+                    rest = r.split_once('\n').map(|x| x.1).unwrap_or("");
+                } else if let Some(r) = rest.strip_prefix("/*") {
+                    rest = r.split_once("*/").map(|x| x.1).unwrap_or("");
+                } else {
+                    break;
+                }
+            }
+            !rest.is_empty()
+        })
+        .collect()
+}
+
+fn pg_query(
+    host: &str,
+    port: u16,
+    user: &str,
+    password: &str,
+    database: &str,
+    sql: &str,
+) -> Result<Vec<SqlResult>, String> {
+    use postgres::SimpleQueryMessage;
+    let mut client = pg_client(host, port, user, password, database)?;
+    let mut out: Vec<SqlResult> = Vec::new();
+    for stmt in split_sql(sql) {
+        // 1) Préparation (sans exécution) : types réels des colonnes renvoyées.
+        //    Un échec ici n'est pas bloquant : l'exécution dira la vraie erreur.
+        let prepared = client.prepare(&stmt).ok();
+        // 2) Exécution en protocole simple : valeurs en texte, telles qu'affichées
+        //    par psql. Chaque instruction est validée seule (autocommit), sauf
+        //    BEGIN … COMMIT explicite dans le script.
+        let msgs = match client.simple_query(&stmt) {
+            Ok(m) => m,
+            Err(e) => {
+                out.push(SqlResult {
+                    statement: stmt,
+                    error: Some(pg_err_msg(&e)),
+                    ..Default::default()
+                });
+                break;
+            }
+        };
+        let mut r = SqlResult { statement: stmt, ..Default::default() };
+        let named = |names: Vec<String>| {
+            names.into_iter().map(|name| SqlColumn { name, ..Default::default() }).collect()
+        };
+        for m in msgs {
+            match m {
+                SimpleQueryMessage::RowDescription(cols) => {
+                    r.has_rows = true;
+                    r.columns = named(cols.iter().map(|c| c.name().to_string()).collect());
+                }
+                SimpleQueryMessage::Row(row) => {
+                    if !r.has_rows {
+                        r.has_rows = true;
+                        r.columns =
+                            named(row.columns().iter().map(|c| c.name().to_string()).collect());
+                    }
+                    if r.rows.len() >= SQL_MAX_ROWS {
+                        r.truncated = true;
+                    } else {
+                        r.rows.push((0..row.len()).map(|i| row.get(i).map(str::to_string)).collect());
+                    }
+                }
+                SimpleQueryMessage::CommandComplete(n) => r.affected = n,
+                _ => {}
+            }
+        }
+        if r.has_rows {
+            if let Some(p) = prepared.as_ref().filter(|p| p.columns().len() == r.columns.len()) {
+                // Métadonnées indisponibles : le résultat reste affiché sans elles.
+                let _ = pg_describe(&mut client, p, &mut r);
+            }
+        }
+        out.push(r);
+    }
+    Ok(out)
+}
+
+/// Complète les colonnes d'un résultat avec leur type exact, leur nullabilité,
+/// leur table/colonne d'origine et la clé primaire des tables concernées.
+fn pg_describe(
+    client: &mut postgres::Client,
+    prepared: &postgres::Statement,
+    r: &mut SqlResult,
+) -> Result<(), String> {
+    use postgres::types::Kind;
+    let mut oids: Vec<u32> = Vec::new();
+    for (col, pc) in r.columns.iter_mut().zip(prepared.columns()) {
+        let ty = pc.type_();
+        col.base_type = ty.name().to_string();
+        col.full_type = ty.name().to_string();
+        match ty.kind() {
+            Kind::Enum(vals) => {
+                col.editor = "enum".to_string();
+                col.enum_values = vals.clone();
+            }
+            _ => col.editor = pg_editor(ty.name()).to_string(),
+        }
+        if let Some(oid) = pc.table_oid() {
+            if !oids.contains(&oid) {
+                oids.push(oid);
+            }
+        }
+    }
+    if oids.is_empty() {
+        return Ok(());
+    }
+    // Toutes les colonnes des tables d'origine : type complet (typmod compris),
+    // NOT NULL, appartenance à la clé primaire.
+    let rows = client
+        .query(
+            "SELECT c.oid, n.nspname::text, c.relname::text, a.attnum, a.attname::text, \
+             format_type(a.atttypid, a.atttypmod), a.attnotnull, \
+             COALESCE(a.attnum = ANY(i.indkey), false) \
+             FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped \
+             LEFT JOIN pg_index i ON i.indrelid = c.oid AND i.indisprimary \
+             WHERE c.oid = ANY($1)",
+            &[&oids],
+        )
+        .map_err(|e| pg_err_msg(&e))?;
+    struct Att {
+        oid: u32,
+        table: String,
+        num: i16,
+        name: String,
+        full: String,
+        notnull: bool,
+        pk: bool,
+    }
+    let atts: Vec<Att> = rows
+        .iter()
+        .map(|row| {
+            let schema: String = row.get(1);
+            let rel: String = row.get(2);
+            Att {
+                oid: row.get(0),
+                table: if schema == "public" { rel } else { format!("{schema}.{rel}") },
+                num: row.get(3),
+                name: row.get(4),
+                full: row.get(5),
+                notnull: row.get(6),
+                pk: row.get(7),
+            }
+        })
+        .collect();
+    for (col, pc) in r.columns.iter_mut().zip(prepared.columns()) {
+        let (Some(oid), Some(num)) = (pc.table_oid(), pc.column_id()) else { continue };
+        if let Some(a) = atts.iter().find(|a| a.oid == oid && a.num == num) {
+            col.full_type = a.full.clone();
+            col.nullable = Some(!a.notnull);
+            col.primary_key = a.pk;
+            col.table = Some(a.table.clone());
+            col.origin = Some(a.name.clone());
+        }
+    }
+    for oid in oids {
+        if let Some(a) = atts.iter().find(|a| a.oid == oid) {
+            let pk = atts.iter().filter(|x| x.oid == oid && x.pk).map(|x| x.name.clone()).collect();
+            r.tables.push(SqlTablePk { table: a.table.clone(), pk });
+        }
+    }
+    Ok(())
+}
+
+/// Nom lisible d'un type de colonne MySQL tel que renvoyé par le protocole
+/// (colonnes calculées, sans table d'origine à interroger).
+fn my_wire_type(t: mysql::consts::ColumnType) -> &'static str {
+    use mysql::consts::ColumnType::*;
+    match t {
+        MYSQL_TYPE_TINY => "tinyint",
+        MYSQL_TYPE_SHORT => "smallint",
+        MYSQL_TYPE_INT24 => "mediumint",
+        MYSQL_TYPE_LONG => "int",
+        MYSQL_TYPE_LONGLONG => "bigint",
+        MYSQL_TYPE_FLOAT => "float",
+        MYSQL_TYPE_DOUBLE => "double",
+        MYSQL_TYPE_DECIMAL | MYSQL_TYPE_NEWDECIMAL => "decimal",
+        MYSQL_TYPE_DATE | MYSQL_TYPE_NEWDATE => "date",
+        MYSQL_TYPE_TIME | MYSQL_TYPE_TIME2 => "time",
+        MYSQL_TYPE_DATETIME | MYSQL_TYPE_DATETIME2 => "datetime",
+        MYSQL_TYPE_TIMESTAMP | MYSQL_TYPE_TIMESTAMP2 => "timestamp",
+        MYSQL_TYPE_YEAR => "year",
+        MYSQL_TYPE_BIT => "bit",
+        MYSQL_TYPE_JSON => "json",
+        MYSQL_TYPE_ENUM => "enum",
+        MYSQL_TYPE_SET => "set",
+        MYSQL_TYPE_TINY_BLOB | MYSQL_TYPE_MEDIUM_BLOB | MYSQL_TYPE_LONG_BLOB
+        | MYSQL_TYPE_BLOB => "text",
+        MYSQL_TYPE_VARCHAR | MYSQL_TYPE_VAR_STRING => "varchar",
+        MYSQL_TYPE_STRING => "char",
+        MYSQL_TYPE_GEOMETRY => "geometry",
+        MYSQL_TYPE_NULL => "null",
+        _ => "?",
+    }
+}
+
+fn my_query(
+    host: &str,
+    port: u16,
+    user: &str,
+    password: &str,
+    database: &str,
+    sql: &str,
+) -> Result<Vec<SqlResult>, String> {
+    use mysql::consts::ColumnFlags;
+    use mysql::prelude::Queryable;
+    let mut conn = my_conn(host, port, user, password, database)?;
+    let mut out: Vec<SqlResult> = Vec::new();
+    // Le serveur découpe lui-même le script (multi-statements) : les blocs
+    // BEGIN … END des procédures restent intacts.
+    match conn.query_iter(sql) {
+        Err(e) => out.push(SqlResult { error: Some(e.to_string()), ..Default::default() }),
+        Ok(mut res) => {
+            while let Some(set) = res.iter() {
+                let columns: Vec<SqlColumn> = set
+                    .columns()
+                    .as_ref()
+                    .iter()
+                    .map(|c| {
+                        let org_table = c.org_table_str().into_owned();
+                        // Écriture possible seulement dans la base courante.
+                        let same_db = c.schema_str().eq_ignore_ascii_case(database);
+                        let base = my_wire_type(c.column_type()).to_string();
+                        SqlColumn {
+                            name: c.name_str().into_owned(),
+                            full_type: base.clone(),
+                            base_type: base,
+                            primary_key: c.flags().contains(ColumnFlags::PRI_KEY_FLAG),
+                            table: Some(org_table).filter(|t| !t.is_empty() && same_db),
+                            origin: Some(c.org_name_str().into_owned()).filter(|s| !s.is_empty()),
+                            ..Default::default()
+                        }
+                    })
+                    .collect();
+                let has_rows = !columns.is_empty();
+                // Instruction sans lignes : le paquet OK (lignes affectées) est déjà lu.
+                let affected = if has_rows { 0 } else { set.affected_rows() };
+                let mut r = SqlResult { columns, has_rows, affected, ..Default::default() };
+                for row in set {
+                    let row = match row {
+                        Ok(row) => row,
+                        Err(e) => {
+                            // Instruction en échec : on garde les résultats précédents.
+                            r.error = Some(e.to_string());
+                            break;
+                        }
+                    };
+                    if has_rows {
+                        r.affected += 1;
+                    }
+                    if r.rows.len() >= SQL_MAX_ROWS {
+                        r.truncated = true;
+                        continue;
+                    }
+                    r.rows.push((0..row.len()).map(|i| my_value_to_string(row.as_ref(i))).collect());
+                }
+                let failed = r.error.is_some();
+                out.push(r);
+                if failed {
+                    break;
+                }
+            }
+        }
+    }
+    // Métadonnées réelles des tables d'origine (type complet, NULL, clé primaire).
+    let mut tables: Vec<String> = Vec::new();
+    for c in out.iter().flat_map(|r| &r.columns) {
+        if let Some(t) = &c.table {
+            if !tables.contains(t) {
+                tables.push(t.clone());
+            }
+        }
+    }
+    // (TABLE_NAME, COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY)
+    type Meta = (String, String, String, String, String, String);
+    let mut meta: Vec<Meta> = Vec::new();
+    for t in &tables {
+        let rows: Vec<Meta> = conn
+            .exec(
+                "SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY \
+                 FROM information_schema.COLUMNS \
+                 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?",
+                (t,),
+            )
+            .unwrap_or_default();
+        meta.extend(rows);
+    }
+    for r in &mut out {
+        for c in &mut r.columns {
+            let found = match (&c.table, &c.origin) {
+                (Some(t), Some(o)) => meta
+                    .iter()
+                    .find(|m| m.0.eq_ignore_ascii_case(t) && m.1.eq_ignore_ascii_case(o)),
+                _ => None,
+            };
+            match found {
+                Some((_, _, dt, ct, nullable, key)) => {
+                    c.base_type = dt.clone();
+                    c.full_type = ct.clone();
+                    c.editor = my_editor(dt, ct);
+                    c.enum_values = if dt == "enum" { parse_mysql_enum(ct) } else { vec![] };
+                    c.nullable = Some(nullable.eq_ignore_ascii_case("YES"));
+                    c.primary_key = key == "PRI";
+                }
+                None => {
+                    // Colonne calculée (ou table hors base courante) : lecture seule.
+                    c.editor = my_editor(&c.base_type, &c.full_type);
+                    c.table = None;
+                }
+            }
+        }
+        let mut seen: Vec<String> = Vec::new();
+        for c in &r.columns {
+            if let Some(t) = &c.table {
+                if !seen.contains(t) {
+                    seen.push(t.clone());
+                }
+            }
+        }
+        r.tables = seen
+            .into_iter()
+            .map(|t| {
+                let pk = meta
+                    .iter()
+                    .filter(|m| m.0.eq_ignore_ascii_case(&t) && m.5 == "PRI")
+                    .map(|m| m.1.clone())
+                    .collect();
+                SqlTablePk { table: t, pk }
+            })
+            .collect();
+    }
+    Ok(out)
+}
+
 /// Message d'erreur Postgres lisible : le `Display` de l'erreur ne dit que
 /// « db error », le vrai message SQL se trouve dans `as_db_error()`.
 fn pg_err_msg(e: &postgres::Error) -> String {
@@ -5414,6 +5889,7 @@ pub fn run() {
             reveal_path,
             db_connect,
             db_tables,
+            db_query,
             db_table_rows,
             db_table_schema,
             db_table_columns,

@@ -15,6 +15,7 @@ import type {
   DbGraphData,
   DbRowUpdate,
   DbSchemaChange,
+  DbSqlResult,
   DbTableData,
   DbTableSchema,
   GitInfo,
@@ -118,6 +119,18 @@ export const api = {
     database: string,
   ) =>
     invoke<string[]>("db_tables", { driver, host, port, user, password, database }),
+
+  /** Exécute un script SQL brut (une ou plusieurs instructions). */
+  dbQuery: (
+    driver: DbDriver,
+    host: string,
+    port: number,
+    user: string,
+    password: string,
+    database: string,
+    sql: string,
+  ) =>
+    invoke<DbSqlResult[]>("db_query", { driver, host, port, user, password, database, sql }),
 
   /** Lit les premières lignes d'une table (bornées par `limit`). Tri optionnel
    *  par `orderBy` (nom de colonne) dans le sens `orderDir` (asc / desc). */

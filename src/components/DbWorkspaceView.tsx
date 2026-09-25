@@ -36,6 +36,9 @@ interface Props {
   /** true = l'onglet épinglé « Schéma » est affiché à la place d'une table. */
   graphOpen: boolean;
   onOpenGraph: () => void;
+  /** true = l'onglet épinglé « SQL » (interpréteur brut) est affiché. */
+  sqlOpen: boolean;
+  onOpenSql: () => void;
   /** Panneaux des onglets (tous montés, seul l'actif est visible). */
   children?: ReactNode;
 }
@@ -58,6 +61,8 @@ export function DbWorkspaceView({
   onClose,
   graphOpen,
   onOpenGraph,
+  sqlOpen,
+  onOpenSql,
   children,
 }: Props) {
   const [q, setQ] = useState("");
@@ -160,7 +165,14 @@ export function DbWorkspaceView({
               >
                 <span className="dbws-tab-name">🗺 Schéma</span>
               </div>
-              {tabs.length === 0 && !graphOpen && (
+              <div
+                className={"dbws-tab dbws-tab-pin" + (sqlOpen ? " active" : "")}
+                onClick={onOpenSql}
+                title="Interpréteur SQL : saisir et exécuter une requête brute"
+              >
+                <span className="dbws-tab-name">⌨ SQL</span>
+              </div>
+              {tabs.length === 0 && !graphOpen && !sqlOpen && (
                 <div className="console-empty-tab">Aucune table ouverte</div>
               )}
               {tabs.map((t) => (
@@ -193,7 +205,7 @@ export function DbWorkspaceView({
               ))}
             </div>
             <div className="dbws-panel">
-              {tabs.length === 0 && !graphOpen ? (
+              {tabs.length === 0 && !graphOpen && !sqlOpen ? (
                 <div className="empty">Sélectionnez une table à gauche pour l'ouvrir.</div>
               ) : (
                 children

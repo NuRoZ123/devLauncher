@@ -9,6 +9,7 @@ import { DbWorkspaceView, type DbWsState } from "./components/DbWorkspaceView";
 import { DbTableDataView, type DbDataState } from "./components/DbTableDataView";
 import { DbTableSchemaView, type DbSchemaState } from "./components/DbTableSchemaView";
 import { DbRelationsView, type DbGraphState } from "./components/DbRelationsView";
+import { DbSqlView } from "./components/DbSqlView";
 import { EnvModal, type EnvModalState } from "./components/EnvModal";
 import { GitChangesView } from "./components/GitChangesView";
 import { PackageLinkModal, type LinkModalState } from "./components/PackageLinkModal";
@@ -523,6 +524,8 @@ export default function App() {
   const [dbGraphMap, setDbGraphMap] = useState<Record<string, DbGraphState>>({});
   /** true = l'onglet « Schéma de la base » est affiché, par base. */
   const [dbGraphOpenMap, setDbGraphOpenMap] = useState<Record<string, boolean>>({});
+  /** true = l'onglet « SQL » (interpréteur brut) est affiché, par base. */
+  const [dbSqlOpenMap, setDbSqlOpenMap] = useState<Record<string, boolean>>({});
   const [dbTabs, setDbTabs] = useState<DbTab[]>([]);
   // Miroir de `dbTabs` : lit l'état courant hors du cycle de rendu (chargement
   // de la structure déclenché juste après un setDbTabs).
@@ -556,6 +559,12 @@ export default function App() {
   const setDbGraphOpen = (v: boolean, pid = activeDbIdRef.current) => {
     if (!pid) return;
     setDbGraphOpenMap((m) => ({ ...m, [pid]: v }));
+    if (v) setDbSqlOpenMap((m) => ({ ...m, [pid]: false }));
+  };
+  const setDbSqlOpen = (v: boolean, pid = activeDbIdRef.current) => {
+    if (!pid) return;
+    setDbSqlOpenMap((m) => ({ ...m, [pid]: v }));
+    if (v) setDbGraphOpenMap((m) => ({ ...m, [pid]: false }));
   };
   const setDbActiveTab = (id: string | null, pid = activeDbIdRef.current) => {
     if (!pid) return;
@@ -1753,6 +1762,7 @@ export default function App() {
       setDbActiveTabMap((m) => ({ ...m, [p.id]: null }));
       setDbGraphMap((m) => ({ ...m, [p.id]: EMPTY_DB_GRAPH }));
       setDbGraphOpenMap((m) => ({ ...m, [p.id]: false }));
+      setDbSqlOpenMap((m) => ({ ...m, [p.id]: false }));
       graphAskedRef.current.delete(p.id);
       const content = await api.readEnv(p.path).catch(() => "");
       const v = resolveDbValues(conn, parseEnv(content));
@@ -1787,6 +1797,36 @@ export default function App() {
       }
     },
     [saveDbConn, pushLocal],
+  );
+
+  /** Identifiants BDD d'un projet résolus depuis son .env (rejette sinon). */
+  const dbCreds = useCallback(
+    async (pid: string) => {
+      const conn = configRef.current?.db_connections?.[pid];
+      const p = allProjects.find((x) => x.id === pid);
+      if (!conn || !p) throw new Error("Connexion introuvable");
+      const content = await api.readEnv(p.path).catch(() => "");
+      const v = resolveDbValues(conn, parseEnv(content));
+      if (!v.portValid) throw new Error(`Port invalide : « ${v.portRaw} »`);
+      return [conn.driver, v.host, v.port, v.user, v.password, v.database] as const;
+    },
+    [allProjects],
+  );
+
+  /** Exécute un script SQL brut sur la base d'un projet. */
+  const runDbSql = useCallback(
+    async (pid: string, sql: string) => api.dbQuery(...(await dbCreds(pid)), sql),
+    [dbCreds],
+  );
+
+  /** Enregistre les cellules modifiées depuis un résultat SQL. */
+  const applySqlEdits = useCallback(
+    async (pid: string, table: string, columns: string[], updates: DbRowUpdate[]) => {
+      const res = await api.dbApplyChanges(...(await dbCreds(pid)), table, columns, [], updates, []);
+      pushLocal(pid, `💾 ${table} (SQL) : ${res.updated} ligne(s) modifiée(s)`, "sys");
+      return res.updated;
+    },
+    [dbCreds, pushLocal],
   );
 
   /** Recharge la liste des tables sans toucher aux onglets ouverts. */
@@ -1914,8 +1954,9 @@ export default function App() {
     (table: string) => {
       const ws = dbWs;
       if (!ws) return;
-      // Ouvrir une table quitte le schéma général (clic sur une boîte).
+      // Ouvrir une table quitte le schéma général (clic sur une boîte) et le SQL.
       setDbGraphOpen(false);
+      setDbSqlOpen(false);
       const existing = dbTabs.find(
         (t) => t.data.projectId === ws.projectId && t.data.table === table,
       );
@@ -2207,6 +2248,11 @@ export default function App() {
       return n;
     });
     setDbGraphOpenMap((m) => {
+      const n = { ...m };
+      delete n[pid];
+      return n;
+    });
+    setDbSqlOpenMap((m) => {
       const n = { ...m };
       delete n[pid];
       return n;
@@ -3491,7 +3537,9 @@ export default function App() {
         const pid = ws.projectId;
         const wsTabs = dbTabs.filter((t) => t.data.projectId === pid);
         const graphThis = dbGraphMap[pid] ?? EMPTY_DB_GRAPH;
-        const graphOpenThis = dbGraphOpenMap[pid] ?? false;
+        const sqlOpenThis = dbSqlOpenMap[pid] ?? false;
+        const graphOpenThis = (dbGraphOpenMap[pid] ?? false) && !sqlOpenThis;
+        const pinnedOpen = graphOpenThis || sqlOpenThis;
         const activeTabThis = dbActiveTabMap[pid] ?? null;
         const visible = pid === activeDbId && !dbWsHidden;
         return (
@@ -3504,15 +3552,18 @@ export default function App() {
               label: t.data.table,
               dirty: dbDirty[t.id] ?? 0,
             }))}
-            activeId={graphOpenThis ? null : activeTabThis}
+            activeId={pinnedOpen ? null : activeTabThis}
             graphOpen={graphOpenThis}
             onOpenGraph={() => {
               setDbGraphOpen(true, pid);
               ensureDbGraph();
             }}
+            sqlOpen={sqlOpenThis}
+            onOpenSql={() => setDbSqlOpen(true, pid)}
             onOpenTable={openTableTab}
             onSelectTab={(id) => {
               setDbGraphOpen(false, pid);
+              setDbSqlOpen(false, pid);
               setDbActiveTab(id, pid);
             }}
             onCloseTab={closeDbTab}
@@ -3526,7 +3577,7 @@ export default function App() {
               <div
                 key={t.id}
                 className="dbws-tabpanel"
-                style={{ display: t.id === activeTabThis && !graphOpenThis ? "flex" : "none" }}
+                style={{ display: t.id === activeTabThis && !pinnedOpen ? "flex" : "none" }}
               >
                 <div className="dbsub-tabs">
                   <button
@@ -3559,7 +3610,7 @@ export default function App() {
                 >
                   <DbTableDataView
                     state={t.data}
-                    active={visible && !graphOpenThis && t.id === activeTabThis && t.view === "data"}
+                    active={visible && !pinnedOpen && t.id === activeTabThis && t.view === "data"}
                     onLimitChange={(n) => changeTabLimit(t.id, n)}
                     onFilterChange={(f) => changeTabFilter(t.id, f)}
                     onSort={(col, dir) => changeTabSort(t.id, col, dir)}
@@ -3583,7 +3634,7 @@ export default function App() {
                   <DbTableSchemaView
                     table={t.data.table}
                     state={t.schema}
-                    active={visible && !graphOpenThis && t.id === activeTabThis && t.view === "schema"}
+                    active={visible && !pinnedOpen && t.id === activeTabThis && t.view === "schema"}
                     driver={ws.driver}
                     tables={ws.tables}
                     onLoadColumns={loadTableColumns}
@@ -3617,6 +3668,18 @@ export default function App() {
                 onSaveLayout={(layout) => saveGraphLayout(pid, layout)}
                 onRefresh={loadDbGraph}
                 onOpenTable={openTableTab}
+              />
+            </div>
+            {/* Interpréteur SQL brut : toujours monté (saisie et résultats conservés). */}
+            <div
+              className="dbws-tabpanel"
+              style={{ display: sqlOpenThis ? "flex" : "none" }}
+            >
+              <DbSqlView
+                projectId={pid}
+                onRun={(sql) => runDbSql(pid, sql)}
+                onApply={(table, columns, updates) => applySqlEdits(pid, table, columns, updates)}
+                onSchemaChanged={refreshWsTables}
               />
             </div>
           </DbWorkspaceView>

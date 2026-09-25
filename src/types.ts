@@ -192,6 +192,41 @@ export interface DbRowUpdate {
   sets: { column: string; value: string | null }[];
 }
 
+/** Métadonnées réelles d'une colonne de résultat SQL (lues côté serveur). */
+export interface DbSqlColumn {
+  name: string;
+  /** Type complet : « character varying(255) », « int(11) unsigned »… */
+  full_type: string;
+  /** Type de base : « varchar », « int4 »… (vide si inconnu). */
+  base_type: string;
+  editor: DbEditor | "";
+  enum_values: string[];
+  /** NULL autorisé (null = inconnu : colonne calculée). */
+  nullable: boolean | null;
+  primary_key: boolean;
+  /** Table d'origine (null = expression, agrégat…). */
+  table: string | null;
+  /** Nom réel de la colonne dans sa table (sans alias). */
+  origin: string | null;
+}
+
+/** Résultat d'une instruction de l'interpréteur SQL brut. */
+export interface DbSqlResult {
+  /** Texte de l'instruction (vide sous MariaDB : découpée par le serveur). */
+  statement: string;
+  columns: DbSqlColumn[];
+  rows: (string | null)[][];
+  /** true = l'instruction renvoie des lignes (SELECT, SHOW, RETURNING…). */
+  has_rows: boolean;
+  affected: number;
+  /** Plus de lignes que la limite d'affichage : la suite est ignorée. */
+  truncated: boolean;
+  /** Clé primaire complète de chaque table d'origine des colonnes. */
+  tables: { table: string; pk: string[] }[];
+  /** Erreur de cette instruction (l'exécution s'est arrêtée là). */
+  error: string | null;
+}
+
 /** Contenu d'un aperçu de table : colonnes + types SQL + lignes (nullables). */
 export interface DbTableData {
   columns: string[];
