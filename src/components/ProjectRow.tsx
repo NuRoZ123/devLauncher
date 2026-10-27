@@ -15,6 +15,8 @@ import type {
 interface Props {
   project: Project;
   git?: GitInfo;
+  /** Fichiers modifiés rangés dans une changelist « ne jamais committer ». */
+  excludedChanges?: number;
   running: boolean;
   busy?: string;
   portInfo?: PortInfo;
@@ -248,6 +250,7 @@ function groupScripts(scriptActions: ActionDef[]): ScriptNode[] {
 export const ProjectRow = memo(function ProjectRow({
   project,
   git,
+  excludedChanges = 0,
   running,
   busy,
   portInfo,
@@ -514,6 +517,10 @@ export const ProjectRow = memo(function ProjectRow({
   // La puce d'état à gauche garde son sens d'origine : gris = arrêté, vert = lancé,
   // orange = tâche en cours (busy).
   const dirty = !!git && git.changes > 0;
+  // Vraies modifications = hors changelists « ne jamais committer ».
+  const realChanges = Math.max(0, (git?.changes ?? 0) - excludedChanges);
+  // Dossier versionné par git (branche détectée) : l'onglet git a du sens.
+  const isGitRepo = !!git && git.branch !== "—";
 
   // Service pouvant exposer une BDD (bouton/entrée base de données).
   const dbEligible = project.kind === "service" && project.has_env && !dbDisabled;
@@ -709,13 +716,45 @@ export const ProjectRow = memo(function ProjectRow({
               )}
             </button>
           )}
-          {!nested && dirty && !hidePort && (
+          {!nested && dirty && !hidePort && realChanges > 0 && (
             <button
               className="chip chip-dirty chip-dirty-btn"
               title="Voir les modifications non commitées"
               onClick={() => onOpenGitChanges(project)}
             >
-              ● {git!.changes}
+              ● {realChanges}
+            </button>
+          )}
+          {/* Commits pas encore poussés / commits distants à récupérer. */}
+          {!nested && !hidePort && !!git?.ahead && (
+            <button
+              className="chip chip-ahead chip-dirty-btn"
+              title={
+                git.upstream
+                  ? `${git.ahead} commit${git.ahead > 1 ? "s" : ""} à pousser vers ${git.upstream}`
+                  : `${git.ahead} commit${git.ahead > 1 ? "s" : ""} jamais poussé${git.ahead > 1 ? "s" : ""} (branche sans branche distante)`
+              }
+              onClick={() => onOpenGitChanges(project)}
+            >
+              ↑ {git.ahead}
+            </button>
+          )}
+          {!nested && !hidePort && !!git?.behind && (
+            <button
+              className="chip chip-behind chip-dirty-btn"
+              title={`${git.behind} commit${git.behind > 1 ? "s" : ""} à récupérer depuis ${git.upstream} (depuis le dernier fetch)`}
+              onClick={() => onOpenGitChanges(project)}
+            >
+              ↓ {git.behind}
+            </button>
+          )}
+          {!nested && dirty && !hidePort && excludedChanges > 0 && (
+            <button
+              className="chip chip-excluded chip-dirty-btn"
+              title={`${excludedChanges} fichier${excludedChanges > 1 ? "s" : ""} rangé${excludedChanges > 1 ? "s" : ""} dans une changelist « ne jamais committer »`}
+              onClick={() => onOpenGitChanges(project)}
+            >
+              ⊘ {excludedChanges}
             </button>
           )}
           {project.port != null &&
@@ -850,13 +889,17 @@ export const ProjectRow = memo(function ProjectRow({
             title={
               repoLoading
                 ? "Recherche du dépôt…"
-                : repoLink
-                  ? "Dépôt : liens GitLab / GitHub · clic droit : modifier le lien"
-                  : "Lier un dépôt Git (clic pour configurer)"
+                : isGitRepo
+                  ? "Ouvrir l'onglet git (modifications, commits, push/pull, liens GitLab / GitHub)"
+                  : repoLink
+                    ? "Dépôt : liens GitLab / GitHub · clic droit : modifier le lien"
+                    : "Lier un dépôt Git (clic pour configurer)"
             }
             onClick={() => {
               if (repoLoading) return;
-              if (repoLink) toggleRepoMenu();
+              // Projet git : l'onglet git regroupe tout (liens en ligne compris).
+              if (isGitRepo) onOpenGitChanges(project);
+              else if (repoLink) toggleRepoMenu();
               else onEditRepo(project);
             }}
             onContextMenu={(e) => {
@@ -965,6 +1008,8 @@ export const ProjectRow = memo(function ProjectRow({
         ) : null}
       </div>
 
+      {/* Menu des liens : seulement pour un dossier non versionné lié à un dépôt
+          (pour un projet git, ces liens sont dans l'onglet git). */}
       {repoMenu && repoLinks && (
         <div
           className="context-menu repo-menu"

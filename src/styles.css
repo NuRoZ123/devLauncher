@@ -1319,7 +1319,8 @@ input[type="checkbox"]:disabled {
 }
 .console-body {
   flex: 1;
-  overflow-y: auto;
+  /* Lignes longues : défilement horizontal plutôt que retour à la ligne. */
+  overflow: auto;
   padding: 10px 12px;
   font-family: "Cascadia Code", "Consolas", monospace;
   font-size: 12.5px;
@@ -1386,8 +1387,11 @@ input[type="checkbox"]:disabled {
 .log-line {
   display: flex;
   gap: 10px;
-  white-space: pre-wrap;
-  word-break: break-word;
+  white-space: pre;
+  /* Largeur au contenu (au moins celle de la console) : la ligne ne se
+     replie pas, la console défile horizontalement. */
+  width: max-content;
+  min-width: 100%;
 }
 .log-time {
   color: #4a5562;
@@ -1395,7 +1399,7 @@ input[type="checkbox"]:disabled {
   user-select: none;
 }
 .log-text {
-  flex: 1;
+  flex: 1 0 auto;
 }
 .log-out .log-text {
   color: #cbd5e1;
@@ -1430,6 +1434,52 @@ input[type="checkbox"]:disabled {
   margin: 26px 0 6px;
   padding-bottom: 6px;
   border-bottom: 1px solid var(--border);
+}
+/* Encadré d'aide (procédure à suivre hors de l'appli). */
+.help-block {
+  margin: 10px 0;
+  padding: 10px 14px;
+  background: var(--panel-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+.help-block p {
+  margin: 6px 0;
+}
+.help-block ol {
+  margin: 6px 0;
+  padding-left: 20px;
+  line-height: 1.9;
+}
+kbd {
+  display: inline-block;
+  padding: 0 6px;
+  font: 11.5px ui-monospace, SFMono-Regular, Menlo, monospace;
+  line-height: 18px;
+  color: var(--text);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+}
+/* Curseur de réglage + valeur courante. */
+.range-row {
+  align-items: center;
+  max-width: 460px;
+}
+input[type="range"] {
+  padding: 0;
+  border: none;
+  background: transparent;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.range-value {
+  min-width: 58px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
 }
 .settings-tabs {
   position: sticky;
@@ -3639,6 +3689,17 @@ button.db-table {
   font-size: 12.5px;
   padding: 2px 0;
 }
+.taskq-time {
+  flex: none;
+  margin-left: 8px;
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.taskq-time.running {
+  color: var(--accent);
+}
 .taskq-step-label {
   flex: 1;
   min-width: 0;
@@ -3975,40 +4036,51 @@ button.db-table {
   color: var(--muted);
   white-space: nowrap;
 }
+/* Rollback d'une changelist : bouton et liste de la confirmation. */
+.gc-rollback-btn:not(:disabled):hover {
+  color: var(--red);
+}
+.gc-rollback-list {
+  max-height: 260px;
+  overflow: auto;
+  margin: 4px 0 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+}
+.gc-rollback-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 12.5px;
+  min-width: 0;
+}
+.gc-rollback-item .gc-name {
+  flex: 1;
+  min-width: 0;
+}
+.gc-rollback-item .muted {
+  flex: none;
+  font-size: 11.5px;
+}
+/* Fichier partiellement indexé (modifié après l'ajout à l'index). */
+.gc-partial {
+  flex: none;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 10.5px;
+  white-space: nowrap;
+  color: var(--yellow);
+  border: 1px solid currentColor;
+  opacity: 0.85;
+}
 .gc-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 13px;
-}
-.gc-diff {
-  margin: 0;
-  padding: 8px 10px;
-  border-top: 1px solid var(--border-soft);
-  background: var(--bg-2);
-  font-size: 12px;
-  line-height: 1.5;
-  overflow-x: auto;
-  white-space: pre;
-  max-height: 420px;
-  overflow-y: auto;
-}
-.gc-dl {
-  display: block;
-}
-.gc-dl-add {
-  color: var(--green);
-  background: rgba(63, 185, 80, 0.08);
-}
-.gc-dl-del {
-  color: var(--red);
-  background: rgba(248, 81, 73, 0.08);
-}
-.gc-dl-hunk {
-  color: var(--accent-2);
-}
-.gc-dl-meta {
-  color: var(--muted);
 }
 .gc-commit {
   margin-top: 22px;
@@ -4184,4 +4256,1214 @@ button.db-table {
 }
 .dbsql-table td.dbsql-num {
   text-align: right;
+}
+
+/* ---------------- Opération git en cours (merge/rebase) ---------------- */
+.gc-merge {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--panel);
+}
+.gc-merge-conflict {
+  border-color: #6b2a27;
+  background: var(--red-bg);
+}
+.gc-merge-txt {
+  flex: 1;
+  font-size: 13px;
+}
+.gc-merge-msg {
+  flex-basis: 100%;
+  margin: 4px 0 0;
+}
+
+/* ---------------- Boîte « Conflits » ---------------- */
+.cf-modal {
+  width: min(760px, 94vw);
+}
+.cf-sub {
+  flex-wrap: wrap;
+  font-size: 12.5px;
+}
+.cf-sub b {
+  color: var(--text-dim);
+}
+.cf-p {
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.5;
+  margin: 10px 0 0;
+}
+.cf-body {
+  display: flex;
+  gap: 12px;
+  min-height: 0;
+}
+.cf-table {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--bg-2);
+  display: flex;
+  flex-direction: column;
+}
+.cf-rows {
+  overflow-y: auto;
+  max-height: 44vh;
+  min-height: 120px;
+}
+.cf-row {
+  display: grid;
+  grid-template-columns: 1fr 90px 90px;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 10px;
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+  border-bottom: 1px solid var(--border-soft);
+}
+.cf-row:hover {
+  background: var(--panel-2);
+}
+.cf-row.sel {
+  background: #1d2b40;
+}
+.cf-row-head {
+  cursor: default;
+  font-size: 11.5px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.cf-row-head:hover {
+  background: transparent;
+}
+.cf-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cf-dir {
+  color: var(--muted);
+}
+.cf-st {
+  font-size: 11.5px;
+  padding: 1px 7px;
+  border-radius: 20px;
+}
+.cf-st-mod {
+  color: #7fb2ff;
+  background: rgba(79, 140, 255, 0.14);
+}
+.cf-st-add {
+  color: var(--green);
+  background: var(--green-bg);
+}
+.cf-st-del {
+  color: var(--text-dim);
+  background: rgba(140, 150, 160, 0.16);
+}
+.cf-empty {
+  padding: 16px;
+  font-size: 13px;
+}
+.cf-side {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 150px;
+}
+.cf-msg {
+  max-height: 140px;
+}
+
+/* ---------------- Fusion 3 volets (façon JetBrains) ---------------- */
+.mv {
+  --mv-lh: 20px;
+  --mv-mod: rgba(79, 140, 255, 0.2);
+  --mv-mod-b: rgba(79, 140, 255, 0.7);
+  --mv-add: rgba(63, 185, 80, 0.2);
+  --mv-add-b: rgba(63, 185, 80, 0.7);
+  --mv-del: rgba(140, 150, 160, 0.22);
+  --mv-del-b: rgba(160, 170, 180, 0.7);
+  --mv-conf: rgba(248, 81, 73, 0.24);
+  --mv-conf-b: rgba(248, 81, 73, 0.8);
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 12px 16px;
+  gap: 8px;
+}
+.mv-top {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mv-title {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  min-width: 0;
+}
+.mv-file {
+  font-weight: 600;
+  font-size: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mv-stats {
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+.mv-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.mv-sep {
+  width: 1px;
+  height: 20px;
+  background: var(--border);
+  margin: 0 4px;
+}
+.mv-auto {
+  margin-left: auto;
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+.mv-heads,
+.mv-panes {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 64px minmax(0, 1fr) 64px minmax(0, 1fr);
+}
+.mv-head {
+  font-size: 12.5px;
+  padding: 0 4px 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mv-head-res b {
+  color: var(--accent-2);
+}
+.mv-del-tag {
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--red);
+}
+.mv-panes {
+  flex: 1;
+  min-height: 0;
+}
+.mv-scroll {
+  overflow: auto;
+  min-height: 0;
+  background: var(--bg-2);
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+}
+.mv-scroll-res {
+  border-color: #2e4468;
+}
+.mv-canvas {
+  position: relative;
+  min-width: 100%;
+  width: max-content;
+  /* Même police que le code : les unités `ch` (largeur du conteneur, position
+     des surlignages mot à mot) correspondent alors exactement aux caractères. */
+  font-family: "Cascadia Code", "Consolas", monospace;
+  font-size: 12.5px;
+}
+.mv-text,
+.mv-nums,
+.mv-edit {
+  font-family: "Cascadia Code", "Consolas", monospace;
+  font-size: 12.5px;
+  line-height: var(--mv-lh);
+  tab-size: 4;
+  margin: 0;
+}
+.mv-text {
+  position: relative;
+  padding: 0 16px 0 56px;
+  white-space: pre;
+  color: var(--text);
+}
+.mv-nums {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 46px;
+  padding-right: 8px;
+  text-align: right;
+  color: var(--muted);
+  user-select: none;
+  pointer-events: none;
+  border-right: 1px solid var(--border-soft);
+  z-index: 1;
+}
+.mv-edit {
+  position: relative;
+  z-index: 2;
+  display: block;
+  border: 0;
+  outline: none;
+  resize: none;
+  overflow: hidden;
+  background: transparent;
+  color: var(--text);
+  padding: 0 16px 0 56px;
+  white-space: pre;
+  caret-color: var(--accent-2);
+}
+.mv-hl {
+  position: absolute;
+  left: 0;
+  right: 0;
+  pointer-events: none;
+  border-top: 1px solid transparent;
+  border-bottom: 1px solid transparent;
+}
+.mv-hl-modified {
+  background: var(--mv-mod);
+  border-color: var(--mv-mod-b);
+}
+.mv-hl-added {
+  background: var(--mv-add);
+  border-color: var(--mv-add-b);
+}
+.mv-hl-deleted {
+  background: var(--mv-del);
+  border-color: var(--mv-del-b);
+}
+.mv-hl-conflict {
+  background: var(--mv-conf);
+  border-color: var(--mv-conf-b);
+}
+.mv-hl-resolved {
+  background: rgba(120, 130, 140, 0.08);
+  border-left: 3px solid rgba(120, 130, 140, 0.5);
+}
+.mv-hl-empty {
+  border-bottom: 0;
+  border-top-width: 2px;
+}
+.mv-hl-done {
+  opacity: 0.3;
+}
+.mv-gutter {
+  position: relative;
+  overflow: hidden;
+  min-height: 0;
+}
+.mv-gutter-svg {
+  position: absolute;
+  inset: 0;
+  display: block;
+}
+.mv-link {
+  stroke-width: 1;
+}
+.mv-link.mv-hl-modified {
+  fill: var(--mv-mod);
+  stroke: var(--mv-mod-b);
+}
+.mv-link.mv-hl-added {
+  fill: var(--mv-add);
+  stroke: var(--mv-add-b);
+}
+.mv-link.mv-hl-deleted {
+  fill: var(--mv-del);
+  stroke: var(--mv-del-b);
+}
+.mv-link.mv-hl-conflict {
+  fill: var(--mv-conf);
+  stroke: var(--mv-conf-b);
+}
+.mv-acts {
+  position: absolute;
+  display: flex;
+  gap: 2px;
+  height: var(--mv-lh);
+  align-items: center;
+  z-index: 2;
+}
+.mv-acts-left {
+  left: 2px;
+}
+.mv-acts-right {
+  right: 2px;
+}
+.mv-act {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1;
+  height: 18px;
+  min-width: 20px;
+  padding: 0 4px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.mv-act:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.mv-act-append {
+  color: var(--yellow);
+}
+.mv-act-ignore {
+  color: var(--muted);
+}
+.mv-act-ignore:hover {
+  background: var(--red-bg);
+  border-color: var(--red);
+  color: var(--red);
+}
+.mv-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mv-footer-fill {
+  flex: 1;
+}
+.mv-confirm {
+  font-size: 12.5px;
+  color: var(--yellow);
+}
+.cf-fetch {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  font-size: 12px;
+}
+.cf-hint {
+  font-size: 12px;
+  color: var(--muted);
+}
+.cf-step {
+  margin-left: 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--accent-2);
+  background: rgba(79, 140, 255, 0.14);
+  padding: 2px 8px;
+  border-radius: 20px;
+  vertical-align: middle;
+}
+.cf-commit {
+  font-size: 12.5px;
+  margin: -6px 0 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cf-commit code {
+  font-family: "Cascadia Code", "Consolas", monospace;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.cf-info {
+  font-size: 12.5px;
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid #2e4468;
+  background: rgba(79, 140, 255, 0.1);
+  color: var(--text-dim);
+}
+
+/* ---- Fusion : coloration syntaxique (highlight.js, palette sombre) ---- */
+.mv-under {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+}
+/* Le texte saisi est invisible : c'est la couche colorée dessous qu'on voit. */
+.mv-edit {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+.mv-edit::selection {
+  background: rgba(79, 140, 255, 0.35);
+}
+.mv-text .hljs-comment,
+.mv-text .hljs-quote {
+  color: #6a9955;
+  font-style: italic;
+}
+.mv-text .hljs-keyword,
+.mv-text .hljs-selector-tag,
+.mv-text .hljs-literal,
+.mv-text .hljs-doctag,
+.mv-text .hljs-name {
+  color: #569cd6;
+}
+.mv-text .hljs-meta,
+.mv-text .hljs-meta .hljs-keyword {
+  color: #c586c0;
+}
+.mv-text .hljs-string,
+.mv-text .hljs-meta .hljs-string,
+.mv-text .hljs-template-tag {
+  color: #ce9178;
+}
+.mv-text .hljs-number,
+.mv-text .hljs-symbol,
+.mv-text .hljs-bullet {
+  color: #b5cea8;
+}
+.mv-text .hljs-regexp,
+.mv-text .hljs-link {
+  color: #d16969;
+}
+.mv-text .hljs-title.function_,
+.mv-text .hljs-title,
+.mv-text .hljs-section {
+  color: #dcdcaa;
+}
+.mv-text .hljs-title.class_,
+.mv-text .hljs-type,
+.mv-text .hljs-built_in,
+.mv-text .hljs-class .hljs-title {
+  color: #4ec9b0;
+}
+.mv-text .hljs-attr,
+.mv-text .hljs-attribute,
+.mv-text .hljs-variable,
+.mv-text .hljs-template-variable,
+.mv-text .hljs-property,
+.mv-text .hljs-params,
+.mv-text .hljs-selector-attr,
+.mv-text .hljs-selector-pseudo {
+  color: #9cdcfe;
+}
+.mv-text .hljs-tag {
+  color: #808080;
+}
+.mv-text .hljs-selector-id,
+.mv-text .hljs-selector-class {
+  color: #d7ba7d;
+}
+.mv-text .hljs-subst {
+  color: var(--text);
+}
+.mv-text .hljs-addition {
+  color: var(--green);
+}
+.mv-text .hljs-deletion {
+  color: var(--red);
+}
+.mv-text .hljs-emphasis {
+  font-style: italic;
+}
+.mv-text .hljs-strong {
+  font-weight: bold;
+}
+
+/* ---- Fusion : portions qui diffèrent entre les deux côtés (mot à mot) ---- */
+.mv-word {
+  position: absolute;
+  height: var(--mv-lh);
+  pointer-events: none;
+  border-radius: 3px;
+  background: rgba(79, 140, 255, 0.38);
+}
+.mv-word-conflict {
+  background: rgba(248, 81, 73, 0.45);
+  box-shadow: inset 0 0 0 1px rgba(248, 81, 73, 0.6);
+}
+
+/* ---------------- Chemin de git.exe ---------------- */
+.git-check-ok {
+  color: var(--green);
+  font-size: 12px;
+}
+
+/* ---------------- Changelists (page git + carte) ---------------- */
+.chip-excluded {
+  color: var(--muted);
+  border: 1px dashed var(--border);
+  background: transparent;
+}
+.chip-excluded:hover {
+  border-color: var(--text-dim);
+  color: var(--text-dim);
+}
+.gc-cl-bar {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+}
+.gc-cl-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.gc-cl-head h2 {
+  margin: 0;
+  cursor: default;
+}
+.gc-cl-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.gc-cl-ex {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-right: 6px;
+}
+.gc-cl-name-input {
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 5px;
+  border: 1px solid var(--accent);
+  background: var(--bg-2);
+  color: var(--text);
+}
+.gc-cl-excluded h2 {
+  color: var(--text-dim);
+}
+.gc-cl-excluded .gc-file {
+  opacity: 0.7;
+}
+.gc-cl-ex-ico {
+  color: var(--muted);
+}
+.gc-cl-toggle {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 2px 4px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.gc-cl-toggle:hover {
+  color: var(--text);
+  background: var(--panel-2);
+}
+.gc-cl-head h2 {
+  cursor: pointer;
+  user-select: none;
+}
+.gc-cl-collapsed .gc-cl-head {
+  margin-bottom: 0;
+}
+
+/* ---------------- Comparaison 2 volets (HEAD ↔ travail) ---------------- */
+.dv-heads,
+.dv-panes {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 56px minmax(0, 1fr);
+}
+.dv-panes {
+  flex: 1;
+  min-height: 0;
+}
+
+
+/* ---------------- Commits à pousser / à récupérer ---------------- */
+.chip-ahead {
+  color: var(--accent-2);
+  background: rgba(79, 140, 255, 0.14);
+  border-color: transparent;
+  font-variant-numeric: tabular-nums;
+}
+.chip-ahead:hover {
+  border-color: var(--accent);
+}
+.chip-behind {
+  color: #c39bff;
+  background: rgba(163, 113, 247, 0.14);
+  border-color: transparent;
+  font-variant-numeric: tabular-nums;
+}
+.chip-behind:hover {
+  border-color: #a371f7;
+}
+.gc-out-ahead {
+  color: var(--accent-2);
+}
+.gc-out-behind {
+  color: #c39bff;
+}
+.gc-out-up {
+  font-weight: 400;
+  font-size: 13px;
+}
+.gc-commits {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.gc-commit-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: var(--panel);
+  border: 1px solid var(--border-soft);
+  font-size: 13px;
+  min-width: 0;
+}
+.gc-commit-dir {
+  font-weight: 600;
+}
+.gc-commit-hash {
+  font-family: "Cascadia Code", "Consolas", monospace;
+  font-size: 12px;
+  color: var(--yellow);
+}
+.gc-commit-subj {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gc-commit-meta {
+  font-size: 12px;
+  white-space: nowrap;
+}
+.gc-commits small {
+  margin-top: 4px;
+}
+
+
+/* ---------------- Onglet git : en-tête condensé, onglets, bouton scindé ---------------- */
+/* Historique : toute la largeur disponible (liste + détail côte à côte). */
+.gc-wide {
+  max-width: none;
+}
+/* Bouton « GitLab ▾ » à côté de la branche, avec son menu de liens. */
+.gc-links {
+  position: relative;
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 400;
+}
+.gc-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 50;
+  min-width: 220px;
+  padding: 5px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+}
+.gc-menu .menu-item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  background: transparent;
+  color: var(--text);
+}
+.gc-tabs {
+  display: flex;
+  gap: 2px;
+  margin-top: 14px;
+  border-bottom: 1px solid var(--border);
+}
+.gc-tab {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  padding: 7px 14px;
+  font-size: 13.5px;
+  font-weight: 500;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: -1px;
+}
+.gc-tab:hover {
+  color: var(--text);
+}
+.gc-tab.on {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+.gc-tab-count {
+  font-size: 11px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: var(--yellow-bg);
+  color: var(--yellow);
+}
+/* Bouton scindé : action principale + flèche collée, même style. */
+.split-btn {
+  position: relative;
+  display: inline-flex;
+}
+.split-main {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.split-caret {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  border-left: 1px solid rgba(255, 255, 255, 0.28);
+  padding-left: 8px;
+  padding-right: 8px;
+}
+.split-menu {
+  min-width: 170px;
+}
+
+/* ---------------- Historique des commits ---------------- */
+.gh {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.gh-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.gh-rev,
+.gh-input {
+  font: inherit;
+  font-size: 13px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--text);
+}
+.gh-rev {
+  max-width: 260px;
+}
+.gh-input:focus,
+.gh-rev:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.gh-filter {
+  flex: 1;
+  min-width: 180px;
+}
+.gh-file {
+  position: relative;
+  width: 300px;
+}
+.gh-file .gh-input {
+  width: 100%;
+}
+.gh-file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 3px 4px 3px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  background: rgba(79, 140, 255, 0.12);
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.gh-file-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 50;
+  max-height: 340px;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+.gh-file-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  color: var(--text);
+  padding: 5px 8px;
+  border-radius: 5px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.gh-file-item .muted {
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.gh-file-item:hover {
+  background: var(--panel-2);
+}
+.gh-file-empty {
+  padding: 8px;
+  font-size: 13px;
+}
+.gh-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 6px minmax(0, 1.2fr);
+  gap: 4px;
+  height: calc(100vh - 290px);
+  min-height: 360px;
+}
+.gh-list,
+.gh-detail {
+  overflow-y: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--bg-2);
+}
+.gh-list {
+  padding: 4px;
+}
+.gh-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text);
+  padding: 6px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.gh-row:hover {
+  background: var(--panel-2);
+}
+.gh-row.sel {
+  background: #1d2b40;
+  border-color: var(--accent);
+}
+.gh-row-subj {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gh-row-meta {
+  display: flex;
+  gap: 10px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+.gh-row-author {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 45%;
+}
+.gh-hash {
+  margin-left: auto;
+  font-family: "Cascadia Code", "Consolas", monospace;
+  color: var(--yellow);
+}
+.gh-merge {
+  color: var(--muted);
+}
+.gh-ref {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 10px;
+  font-size: 11px;
+  background: var(--green-bg);
+  color: var(--green);
+  vertical-align: 1px;
+}
+.gh-ref-remote {
+  background: rgba(163, 113, 247, 0.14);
+  color: #c39bff;
+}
+.gh-ref-tag {
+  background: var(--yellow-bg);
+  color: var(--yellow);
+}
+.gh-more {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px;
+  text-align: center;
+  font-size: 13px;
+}
+.gh-placeholder {
+  padding: 24px;
+  font-size: 13px;
+}
+.gh-detail {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.gh-cd {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.gh-cd-top {
+  flex: none;
+  overflow-y: auto;
+  min-height: 0;
+}
+.gh-cd-head {
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.gh-cd-subj {
+  font-weight: 600;
+  font-size: 14px;
+  margin-bottom: 4px;
+  white-space: pre-wrap;
+}
+.gh-cd-meta {
+  font-size: 12px;
+}
+.gh-copy {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+}
+.gh-copy code {
+  font-family: "Cascadia Code", "Consolas", monospace;
+  color: var(--yellow);
+}
+.gh-cd-files {
+  display: flex;
+  flex-direction: column;
+  padding: 6px;
+  gap: 1px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.gh-cd-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text);
+  padding: 4px 8px;
+  border-radius: 5px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.gh-cd-file:hover {
+  background: var(--panel-2);
+}
+.gh-cd-file.sel {
+  background: #1d2b40;
+  border-color: var(--accent);
+}
+.gh-cd-diff {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* Séparateur horizontal (volets empilés). */
+.splitter-y {
+  flex: 0 0 6px;
+  cursor: row-resize;
+}
+.splitter-y::after {
+  top: 1px;
+  left: 50%;
+  width: 34px;
+  height: 4px;
+  transform: translateX(-50%);
+}
+/* Comparaison intégrée (historique) : plus compacte que la vue plein écran. */
+.mv-embedded {
+  padding: 8px 10px;
+  gap: 6px;
+}
+.mv-embedded .mv-file {
+  font-size: 13px;
+}
+
+/* Icône « comparer » au bout du nom de fichier (le clic ouvre la comparaison). */
+.gc-compare-ico {
+  margin-left: auto;
+  padding-left: 10px;
+  color: var(--muted);
+}
+.gc-path:hover .gc-compare-ico {
+  color: var(--accent-2);
+}
+/* Bande de liaison entre volets (comparaison / conflits) : se glisse pour
+   redimensionner les volets voisins ; les boutons » « × restent cliquables. */
+.mv-gutter-drag {
+  cursor: col-resize;
+}
+.mv-gutter-drag:hover {
+  background: rgba(79, 140, 255, 0.06);
+}
+.mv-gutter-drag .mv-act {
+  cursor: pointer;
+}
+
+/* Résultat d'un changement de branche (page git) */
+.gc-branch-msg {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--panel);
+  font-size: 13px;
+}
+.gc-branch-msg.ok {
+  border-color: #245a32;
+  background: var(--green-bg);
+  color: var(--green);
+}
+.gc-branch-msg.ko {
+  border-color: #6b2a27;
+  background: var(--red-bg);
+  color: var(--red);
+}
+.gc-branch-msg-txt {
+  flex: 1;
+}
+.gc-branch-msg-detail {
+  flex-basis: 100%;
+  margin: 2px 0 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--text-dim);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+/* Fusion : état en direct du fichier, à côté de « Appliquer ». */
+.mv-state {
+  font-size: 12.5px;
+  padding: 4px 10px;
+  border-radius: 20px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.mv-state-ok {
+  color: var(--green);
+  background: var(--green-bg);
+  border-color: #245a32;
+}
+.mv-state-todo {
+  appearance: none;
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  color: var(--yellow);
+  background: var(--yellow-bg);
+  border-color: #5a4a1c;
+}
+.mv-state-todo:hover {
+  border-color: var(--yellow);
+}
+.mv-state-conf {
+  color: var(--red);
+  font-weight: 600;
+}
+
+/* ---------------- Barre d'aperçu des changements (marge droite des volets) ---------------- */
+/* Chaque volet = zone de code défilable + barre d'aperçu collée à sa droite. */
+.mv-pane {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+.mv-pane > .mv-scroll {
+  flex: 1;
+  min-width: 0;
+}
+.mv-ruler {
+  position: relative;
+  flex: 0 0 10px;
+  margin-left: 2px;
+  border-radius: 3px;
+  background: var(--bg-2);
+  border: 1px solid var(--border-soft);
+  cursor: pointer;
+  overflow: hidden;
+}
+.mv-ruler-mark {
+  position: absolute;
+  left: 1px;
+  right: 1px;
+  border-radius: 1px;
+  /* Couleur pleine (les classes .mv-hl-* des blocs sont semi-transparentes). */
+  opacity: 1;
+}
+.mv-ruler-mark.mv-hl-modified {
+  background: var(--mv-mod-b);
+}
+.mv-ruler-mark.mv-hl-added {
+  background: var(--mv-add-b);
+}
+.mv-ruler-mark.mv-hl-deleted {
+  background: var(--mv-del-b);
+}
+.mv-ruler-mark.mv-hl-conflict {
+  background: var(--mv-conf-b);
+}
+.mv-ruler-mark.mv-ruler-done {
+  opacity: 0.3;
+}
+.mv-ruler-mark:hover {
+  filter: brightness(1.4);
 }

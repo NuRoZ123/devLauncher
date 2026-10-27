@@ -491,6 +491,15 @@ export function DbRelationsView({
 
   const onWheel = (e: React.WheelEvent) => {
     e.preventDefault();
+    // Molette horizontale (ou Maj+molette) : déplacement latéral de la vue.
+    const dx = e.deltaX !== 0 ? e.deltaX : e.shiftKey ? e.deltaY : 0;
+    if (dx !== 0 && Math.abs(dx) >= Math.abs(e.deltaY)) {
+      const { s } = cursorInView(e);
+      const px = e.deltaMode === 1 ? dx * 16 : dx;
+      setView((t) => ({ ...t, x: t.x - px / s }));
+      return;
+    }
+    if (e.deltaY === 0) return;
     const { vx, vy } = cursorInView(e);
     setView((t) => {
       const zoom = Math.min(4, Math.max(0.1, t.zoom * (e.deltaY < 0 ? 1.12 : 0.89)));
@@ -764,6 +773,7 @@ export function DbRelationsView({
             className={"dbgraph-canvas" + (editable ? " editable" : "")}
             ref={canvasRef}
             onWheel={onWheel}
+            data-wheel-own
             onMouseDown={onCanvasDown}
             onMouseMove={onMouseMove}
             onMouseUp={onMouseUp}

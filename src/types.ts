@@ -56,6 +56,67 @@ export interface GitInfo {
   dirty: boolean;
   /** URL web du dépôt (remote origin ou package.json), vide si introuvable. */
   repo_url: string;
+  /** Chemins modifiés (relatifs à la racine du dépôt), non-suivis compris. */
+  files?: string[];
+  /** Branche distante suivie ("origin/main"), "" s'il n'y en a pas. */
+  upstream?: string;
+  /** Commits locaux non poussés / distants non récupérés (depuis le dernier fetch). */
+  ahead?: number;
+  behind?: number;
+}
+
+/** Un commit (liste des commits à pousser / à récupérer). */
+export interface CommitInfo {
+  hash: string;
+  subject: string;
+  author: string;
+  /** Date relative. */
+  date: string;
+}
+
+/** Commit de l'historique (git log). */
+export interface LogCommit {
+  hash: string;
+  short: string;
+  subject: string;
+  author: string;
+  /** Date absolue (jj/mm/aaaa hh:mm) et relative. */
+  date: string;
+  rel: string;
+  /** Branches / tags pointant sur ce commit. */
+  refs: string[];
+  parents: string[];
+}
+
+/** Commits non poussés et commits distants à récupérer. */
+export interface Outgoing {
+  upstream: string;
+  ahead: CommitInfo[];
+  behind: CommitInfo[];
+}
+
+/** Version HEAD et version de travail d'un fichier modifié (null = absente). */
+export interface FileVersions {
+  head: string | null;
+  work: string | null;
+  binary: boolean;
+  crlf: boolean;
+}
+
+/** Changelist (façon JetBrains) d'un projet. */
+export interface Changelist {
+  id: string;
+  name: string;
+  /** Liste « à ne jamais committer » : hors compteur de la carte et de « Tout ajouter ». */
+  excluded?: boolean;
+  /** Section repliée sur la page git (état mémorisé). */
+  collapsed?: boolean;
+}
+
+/** Changelists d'un projet et affectation des fichiers (chemin → id de liste). */
+export interface ProjectChangelists {
+  lists: Changelist[];
+  files: Record<string, string>;
 }
 
 export interface BranchInfo {
@@ -76,6 +137,55 @@ export interface GitChange {
   staged: boolean;
   /** true = fichier non suivi par git (nouveau). */
   untracked: boolean;
+  /** true = partiellement indexé (modifié après l'ajout à l'index) : le fichier
+   *  a deux entrées, indexée (HEAD ↔ index) et non indexée (index ↔ travail). */
+  partial: boolean;
+}
+
+/** Branches distantes (refs/remotes) et upstream de la branche courante. */
+export interface RemoteBranches {
+  branches: { remote: string; name: string }[];
+  /** Upstream de la branche courante ("origin/main"), "" s'il n'y en a pas. */
+  upstream: string;
+  /** Erreur du git fetch (réseau…), "" si OK. */
+  fetch_error: string;
+}
+
+/** Fichier en conflit (entrées `git ls-files -u`, stages 1/2/3). */
+export interface ConflictFile {
+  /** Chemin relatif à la racine du dépôt. */
+  path: string;
+  /** Version ancêtre commune présente (stage 1). */
+  base: boolean;
+  /** Version « ours » présente (stage 2 : HEAD). */
+  ours: boolean;
+  /** Version « theirs » présente (stage 3 : ce qui est fusionné). */
+  theirs: boolean;
+}
+
+/** Opération git en cours (merge, rebase…) et ses fichiers en conflit. */
+export interface MergeState {
+  /** "merge" | "rebase" | "cherry-pick" | "revert" | "" (aucune). */
+  operation: string;
+  ours_label: string;
+  theirs_label: string;
+  /** Rebase : rang du commit en cours de rejeu / nombre total (0 sinon). */
+  step: number;
+  total: number;
+  /** Commit en cours d'application ("abc1234 sujet"), "" pour un merge. */
+  commit: string;
+  conflicts: ConflictFile[];
+}
+
+/** Les trois versions d'un fichier en conflit (null = absente/supprimée). */
+export interface ConflictVersions {
+  base: string | null;
+  ours: string | null;
+  theirs: string | null;
+  /** Contenu non textuel : seule l'acceptation d'un côté entier est possible. */
+  binary: boolean;
+  /** Fins de ligne CRLF à restituer à l'écriture. */
+  crlf: boolean;
 }
 
 export type LogStream = "out" | "err" | "sys";
@@ -119,11 +229,16 @@ export interface TestResult {
 }
 
 export type JobStatus = "pending" | "running" | "done" | "failed" | "cancelled";
+/** Issue finale d'une tâche (renvoyée à l'appelant une fois terminée). */
+export type JobOutcome = "done" | "failed" | "cancelled";
 
 export interface JobStep {
   id: string;
   label: string;
   status: JobStatus;
+  /** Horodatages (ms) du passage à « en cours » et de la fin, pour la durée. */
+  startedAt?: number;
+  endedAt?: number;
 }
 
 /** Une tâche de la file d'exécution (action seule ou séquence). */
@@ -135,6 +250,9 @@ export interface QJob {
   steps: JobStep[];
   status: JobStatus;
   cancellable: boolean;
+  /** Horodatages (ms) du démarrage et de la fin de la tâche, pour la durée. */
+  startedAt?: number;
+  endedAt?: number;
 }
 
 /** Une séquence = un enchaînement ordonné d'étapes. */
@@ -445,6 +563,10 @@ export interface Config {
   /** Sources des projets : projets uniques et/ou dossiers parents typés. */
   sources: ProjectSource[];
   git_bash_path: string;
+  /** git.exe utilisé en direct par les fonctions git (vide = non renseigné). */
+  git_path?: string;
+  /** Changelists git par projet : id de projet → listes et affectations. */
+  changelists?: Record<string, ProjectChangelists>;
   /** Commande de démarrage par défaut (ex. "npm run start", "./startup.sh"). */
   start_command: string;
   /** Exceptions par projet : id ("service:nom", "front:…") → commande dédiée. */

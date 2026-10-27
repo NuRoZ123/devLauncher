@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+import { elapsed, formatDuration } from "../jobTime";
 import type { JobStatus, QJob } from "../types";
 
 interface Props {
@@ -20,8 +22,33 @@ function active(status: JobStatus) {
   return status === "running" || status === "pending";
 }
 
+/** Durée d'une tâche / étape : écoulée (en cours) ou totale (terminée). */
+function Duration({ x, now }: { x: { startedAt?: number; endedAt?: number }; now: number }) {
+  const ms = elapsed(x, now);
+  if (ms == null) return null;
+  const at = (t: number) => new Date(t).toLocaleTimeString();
+  const title =
+    x.endedAt != null
+      ? `Démarrée à ${at(x.startedAt!)}, terminée à ${at(x.endedAt)}`
+      : `Démarrée à ${at(x.startedAt!)} — en cours`;
+  return (
+    <span className={"taskq-time" + (x.endedAt == null ? " running" : "")} title={title}>
+      {formatDuration(ms)}
+    </span>
+  );
+}
+
 export function TaskQueue({ jobs, onCancelJob, onCancelStep, onClear, onClose }: Props) {
   const hasFinished = jobs.some((j) => !active(j.status));
+  // Chrono des tâches en cours : rafraîchi chaque seconde tant qu'il y en a.
+  const [now, setNow] = useState(() => Date.now());
+  const anyRunning = jobs.some((j) => j.status === "running");
+  useEffect(() => {
+    if (!anyRunning) return;
+    setNow(Date.now());
+    const iv = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(iv);
+  }, [anyRunning]);
 
   return (
     <>
@@ -51,6 +78,7 @@ export function TaskQueue({ jobs, onCancelJob, onCancelStep, onClear, onClose }:
                 <span className="taskq-job-name">{j.title}</span>
                 <span className="taskq-job-proj">{j.projectName}</span>
               </div>
+              <Duration x={j} now={now} />
               {active(j.status) && j.cancellable && (
                 <button className="btn btn-stop btn-sm" onClick={() => onCancelJob(j.id)}>
                   Annuler
@@ -68,6 +96,8 @@ export function TaskQueue({ jobs, onCancelJob, onCancelStep, onClear, onClose }:
                     )}
                   </span>
                   <span className="taskq-step-label">{s.label}</span>
+                  {/* Durée par étape : utile seulement s'il y en a plusieurs. */}
+                  {j.steps.length > 1 && <Duration x={s} now={now} />}
                   {active(s.status) && j.cancellable && (
                     <button
                       className="icon-btn step-cancel"

@@ -12,6 +12,10 @@ import { DbRelationsView, type DbGraphState } from "./components/DbRelationsView
 import { DbSqlView } from "./components/DbSqlView";
 import { EnvModal, type EnvModalState } from "./components/EnvModal";
 import { GitChangesView } from "./components/GitChangesView";
+import { GitPathInput, GitPathModal } from "./components/GitPathField";
+import { splitCounts } from "./changelists";
+import { stampJobs } from "./jobTime";
+import { fetchRepo, isFetching } from "./gitFetch";
 import { PackageLinkModal, type LinkModalState } from "./components/PackageLinkModal";
 import { ProjectDetail } from "./components/ProjectDetail";
 import { ProjectRow } from "./components/ProjectRow";
@@ -73,6 +77,7 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { parseEnv } from "./env";
 import { basename, dirname, samePath } from "./paths";
+import { getHScrollSettings, setHScrollSettings, HSCROLL_STEP_MAX, HSCROLL_STEP_MIN } from "./wheel";
 import type {
   ActionDef,
   Config,
@@ -81,6 +86,7 @@ import type {
   DbRowUpdate,
   DbSchemaChange,
   GitInfo,
+  JobOutcome,
   JobStatus,
   LogLine,
   PortInfo,
@@ -151,6 +157,11 @@ const tagKey = (l: LogLine): LogLine => {
 };
 
 const MAX_LINES = 5000;
+// Rafraîchissement auto de l'état git : lecture locale (fichiers, ↑) fréquente,
+// fetch distant (↓ à récupérer) espacé pour ne pas solliciter le serveur.
+const GIT_LOCAL_MS = 10_000;
+const GIT_FETCH_MS = 5 * 60_000;
+const GIT_FIRST_FETCH_MS = 30_000;
 // Identité stable pour « aucune exception » (évite de relancer le scan pour rien).
 const NO_OVERRIDES: Record<string, string> = {};
 const NO_COLORS: Record<string, string> = {};
@@ -385,7 +396,13 @@ export default function App() {
   const [linkVersion, setLinkVersion] = useState(0);
   const [testResults, setTestResults] = useState<Record<string, TestResult>>({});
 
-  const [jobs, setJobs] = useState<QJob[]>([]);
+  const [jobs, setJobsRaw] = useState<QJob[]>([]);
+  // Toute mise à jour de la file passe par stampJobs : chaque tâche / étape est
+  // horodatée à son démarrage et à sa fin (durée affichée dans le panneau).
+  const setJobs = useCallback(
+    (fn: (js: QJob[]) => QJob[]) => setJobsRaw((prev) => stampJobs(fn(prev))),
+    [],
+  );
   const [jobsOpen, setJobsOpen] = useState(false);
   const jobsRef = useRef<QJob[]>([]);
   const tokensRef = useRef<Map<string, StepToken>>(new Map());
@@ -627,6 +644,11 @@ export default function App() {
   }, []);
 
   const bash = config?.git_bash_path ?? DEFAULT_GIT_BASH;
+  // git.exe appelé directement par les fonctions git (repli : git du PATH tant
+  // que l'utilisateur ne l'a pas renseigné).
+  const gitExe = config?.git_path?.trim() || "git";
+  // Invite à renseigner git.exe (utilisateurs existants), masquable pour la session.
+  const [gitAskDismissed, setGitAskDismissed] = useState(false);
   const sources = config?.sources ?? NO_SOURCES;
   const projectLinks = config?.project_links ?? NO_LINKS;
   const sequences = config?.sequences ?? [];
@@ -774,13 +796,14 @@ export default function App() {
   const refreshGitFor = useCallback(
     async (p: Project) => {
       try {
-        const g = await api.gitInfo(bash, p.path);
-        setGitMap((m) => ({ ...m, [p.id]: g }));
+        const g = await api.gitInfo(gitExe, p.path);
+        // État inchangé (cas courant du rafraîchissement auto) : pas de re-rendu.
+        setGitMap((m) => (JSON.stringify(m[p.id]) === JSON.stringify(g) ? m : { ...m, [p.id]: g }));
       } catch {
         /* ignore */
       }
     },
-    [bash],
+    [gitExe],
   );
 
   // ----- Scan -----
@@ -854,9 +877,66 @@ export default function App() {
   }, [
     JSON.stringify(config?.sources ?? []),
     config?.git_bash_path,
+    config?.git_path,
     config?.start_command,
     JSON.stringify(config?.command_overrides ?? {}),
   ]);
+
+  // ----- Rafraîchissement automatique de l'état git -----
+  // Local (fichiers modifiés, ↑ à pousser) : fréquent, ne lit que le dépôt.
+  // Distant (↓ à récupérer) : `git fetch` bien plus espacé, il interroge le
+  // serveur (GitLab…). Rien ne tourne fenêtre masquée ; au retour sur la
+  // fenêtre, relecture locale immédiate (et fetch s'il est dû).
+  const scannedRef = useRef(scanned);
+  scannedRef.current = scanned;
+  const gitAutoBusy = useRef(false);
+  const lastFetchAt = useRef(0);
+  useEffect(() => {
+    let alive = true;
+    const local = async () => {
+      if (gitAutoBusy.current || scanBusyRef.current || document.hidden) return;
+      gitAutoBusy.current = true;
+      try {
+        await Promise.all(scannedRef.current.map((p) => refreshGitFor(p)));
+      } finally {
+        gitAutoBusy.current = false;
+      }
+    };
+    const remote = async () => {
+      if (document.hidden || scanBusyRef.current) return;
+      if (Date.now() - lastFetchAt.current < GIT_FETCH_MS) return;
+      lastFetchAt.current = Date.now();
+      // Un dépôt peut porter plusieurs projets : un seul fetch par dossier.
+      // Fetchs séquentiels pour ne pas ouvrir N connexions au serveur d'un coup.
+      const seen = new Set<string>();
+      for (const p of scannedRef.current) {
+        if (!alive) return;
+        if (seen.has(p.path) || isFetching(p.path)) continue;
+        seen.add(p.path);
+        try {
+          await fetchRepo(gitExe, p.path);
+        } catch {
+          /* hors ligne, pas de remote… : on réessaiera au prochain tour */
+        }
+        if (alive) await refreshGitFor(p);
+      }
+    };
+    // Premier fetch peu après le démarrage (le scan initial a la priorité).
+    lastFetchAt.current = Date.now() - GIT_FETCH_MS + GIT_FIRST_FETCH_MS;
+    const ivLocal = setInterval(local, GIT_LOCAL_MS);
+    const ivRemote = setInterval(remote, 30_000);
+    const onFocus = () => {
+      void local();
+      void remote();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => {
+      alive = false;
+      clearInterval(ivLocal);
+      clearInterval(ivRemote);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [gitExe, refreshGitFor]);
 
   // ----- Vérification des ports (polling régulier via netstat -ano) -----
   const portsBusy = useRef(false);
@@ -989,7 +1069,7 @@ export default function App() {
         loading: true,
       });
       api
-        .listBranches(bash, p.path)
+        .listBranches(gitExe, p.path)
         .then((bs) =>
           setBranchModal((m) =>
             m && m.projectId === p.id ? { ...m, branches: bs, loading: false } : m,
@@ -1002,7 +1082,7 @@ export default function App() {
         branchResolver.current = resolve;
       });
     },
-    [bash, gitMap],
+    [gitExe, gitMap],
   );
 
   function closeBranch(result: { branch: string; isNew: boolean } | null) {
@@ -1234,12 +1314,12 @@ export default function App() {
   }
 
   const processJob = useCallback(
-    async (job: QJob, project: Project, plan: StepPlan[]) => {
+    async (job: QJob, project: Project, plan: StepPlan[]): Promise<JobOutcome> => {
       if (jobCancelRef.current.has(job.id)) {
         job.steps.forEach((s) => patchStep(job.id, s.id, "cancelled"));
         patchJob(job.id, "cancelled");
         jobCancelRef.current.delete(job.id);
-        return;
+        return "cancelled";
       }
       patchJob(job.id, "running");
       openConsole(project.id);
@@ -1284,9 +1364,11 @@ export default function App() {
       }
       setBusyFor(project.id, null);
       refreshGitFor(project);
-      patchJob(job.id, cancelled ? "cancelled" : failed ? "failed" : "done");
+      const outcome: JobOutcome = cancelled ? "cancelled" : failed ? "failed" : "done";
+      patchJob(job.id, outcome);
       job.steps.forEach((s) => tokensRef.current.delete(s.id));
       jobCancelRef.current.delete(job.id);
+      return outcome;
     },
     [executeAction, openConsole, refreshGitFor],
   );
@@ -1294,10 +1376,11 @@ export default function App() {
   // Enchaîne les jobs d'un même projet (file d'attente par projet) : si une
   // action tourne déjà, la nouvelle attend la fin de la précédente.
   const chain = useCallback(
-    (job: QJob, project: Project, plan: StepPlan[]): Promise<void> => {
+    (job: QJob, project: Project, plan: StepPlan[]): Promise<JobOutcome> => {
       const prev = projectChains.current.get(project.id) ?? Promise.resolve();
-      const next = prev.then(() => processJob(job, project, plan)).catch(() => {});
-      projectChains.current.set(project.id, next);
+      // Le résultat (fait / échec / annulé) remonte à l'appelant (ex. page git).
+      const next = prev.then(() => processJob(job, project, plan)).catch((): JobOutcome => "failed");
+      projectChains.current.set(project.id, next.then(() => undefined));
       return next;
     },
     [processJob],
@@ -1446,15 +1529,17 @@ export default function App() {
   const checkout = useCallback(
     async (p: Project) => {
       const res = await askBranch(p);
-      if (!res || res.branch === gitMap[p.id]?.branch) return;
+      if (!res || res.branch === gitMap[p.id]?.branch) return null;
       // Nouvelle branche → création (-b) ; sinon bascule simple (git crée le
       // tracking local d'une branche distante au besoin).
       const command = res.isNew ? "git checkout -b {branch}" : "git checkout {branch}";
-      await runActionOn(
+      const status = await runActionOn(
         p,
         { id: "checkout", label: "Changer de branche", command },
         res.branch,
       );
+      // Résultat renvoyé à l'appelant (la page git l'affiche).
+      return { branch: res.branch, isNew: res.isNew, status };
     },
     [askBranch, gitMap, runActionOn],
   );
@@ -2452,7 +2537,7 @@ export default function App() {
     [dbTabs, allProjects, loadTab, pushLocal],
   );
   const onSetupSubmit = useCallback(
-    async (srcs: ProjectSource[], b: string, cmd: string) => {
+    async (srcs: ProjectSource[], b: string, g: string, cmd: string) => {
       // Conserve les séquences / actions d'une éventuelle config incomplète
       // (cas d'une ancienne config sans commande de démarrage).
       await persist({
@@ -2461,6 +2546,7 @@ export default function App() {
         sources: srcs,
         sources_migrated: true,
         git_bash_path: b,
+        git_path: g,
         start_command: cmd,
         command_overrides: partialConfig?.command_overrides ?? {},
         project_links: partialConfig?.project_links ?? {},
@@ -2934,6 +3020,9 @@ export default function App() {
       key={p.id}
       project={p}
       git={gitMap[p.id]}
+      excludedChanges={
+        splitCounts(gitMap[p.id]?.files ?? [], config?.changelists?.[p.id]).excluded
+      }
       running={running.has(p.id)}
       busy={busy[p.id]}
       portInfo={portInfo[p.id]}
@@ -3144,6 +3233,7 @@ export default function App() {
       <Setup
         initialSources={partialConfig?.sources ?? []}
         initialBash={partialConfig?.git_bash_path || DEFAULT_GIT_BASH}
+        initialGit={partialConfig?.git_path ?? ""}
         initialCommand={partialConfig?.start_command ?? ""}
         onSubmit={onSetupSubmit}
       />
@@ -3151,6 +3241,13 @@ export default function App() {
 
   return (
     <div className="app">
+      {!config.git_path?.trim() && !gitAskDismissed && (
+        <GitPathModal
+          bash={bash}
+          onSave={(g) => void persist({ ...config, git_path: g })}
+          onLater={() => setGitAskDismissed(true)}
+        />
+      )}
       {update && !updateDismissed && (
         <div className="update-banner">
           <span>
@@ -3345,7 +3442,24 @@ export default function App() {
           key={gitChangesProject.id}
           project={gitChangesProject}
           git={gitMap[gitChangesProject.id]}
-          bash={bash}
+          gitExe={gitExe}
+          repoLink={repoLinkFor(gitChangesProject)}
+          hiddenRepoActions={config.repo_actions_hidden?.[gitChangesProject.id]}
+          onOpenUrl={openUrl}
+          onEditRepo={editRepo}
+          changelists={config.changelists?.[gitChangesProject.id]}
+          onChangelists={(next) => {
+            const cfg = configRef.current;
+            if (!cfg) return;
+            const updated: Config = {
+              ...cfg,
+              changelists: { ...(cfg.changelists ?? {}), [gitChangesProject.id]: next },
+            };
+            // Mise à jour immédiate de la réf : deux changements rapprochés
+            // (déplacement puis nettoyage) ne s'écrasent pas.
+            configRef.current = updated;
+            void persist(updated);
+          }}
           onBack={() => setGitChangesPath(null)}
           onChanged={() => refreshGitFor(gitChangesProject)}
           onCheckout={checkout}
@@ -3686,8 +3800,11 @@ export default function App() {
         );
       })}
 
-      {/* Barre des bases ouvertes (bas-droite) : bascule + fermeture. */}
+      {/* Barre des bases ouvertes (bas-droite) : bascule + fermeture. Masquée sur
+          la page git (modifications, résolution de conflits) : inutile là, et
+          elle recouvrait les boutons du bas (Appliquer, Accepter…). */}
       {Object.keys(dbWsMap).length > 0 &&
+        !gitChangesProject &&
         (dbWsHidden || Object.keys(dbWsMap).length > 1) && (
           <div className="dbws-taskbar">
             {Object.values(dbWsMap).map((ws) => {
@@ -3819,6 +3936,12 @@ function SettingsView({
   const [tab, setTab] = useState<SettingsTab>("general");
   const [seqTab, setSeqTab] = useState<"project" | "general">("project");
   const [autoStart, setAutoStart] = useState(false);
+  // Réglages de défilement horizontal : propres au poste (localStorage), appliqués aussitôt.
+  const [hscroll, setHscroll] = useState(getHScrollSettings);
+  const changeHscroll = (p: Partial<typeof hscroll>) => {
+    setHScrollSettings(p);
+    setHscroll(getHScrollSettings());
+  };
   const [pending, setPending] = useState(false);
   const [savedAt, setSavedAt] = useState<number | null>(null);
 
@@ -3853,6 +3976,7 @@ function SettingsView({
       ...d,
       projects_root: d.projects_root.trim(),
       git_bash_path: d.git_bash_path.trim(),
+      git_path: (d.git_path ?? "").trim(),
       start_command: d.start_command.trim(),
       // Les exceptions vidées reviennent à la commande par défaut.
       command_overrides: Object.fromEntries(
@@ -3983,6 +4107,20 @@ function SettingsView({
               {!draft.git_bash_path.trim() && (
                 <small className="field-error">Champ requis pour enregistrer.</small>
               )}
+              <small className="muted">Utilisé pour les services et les actions.</small>
+            </label>
+            <label className="field">
+              <span>Chemin de git.exe</span>
+              <GitPathInput
+                value={draft.git_path ?? ""}
+                onChange={(v) => patch({ git_path: v }, true)}
+                onBlur={() => void flush()}
+                bash={draft.git_bash_path}
+              />
+              <small className="muted">
+                Appelé directement (sans Git Bash) par les fonctions git : branches, modifications, commit,
+                push/pull, conflits.{!draft.git_path?.trim() && " Non renseigné : git du PATH est utilisé."}
+              </small>
             </label>
 
             <label className="autostart-row">
@@ -3993,6 +4131,66 @@ function SettingsView({
               />
               <span>Lancer DevLauncher au démarrage de Windows</span>
             </label>
+
+            <h2>Souris : défilement horizontal</h2>
+            <p className="muted">
+              Les tableaux, la console et les comparaisons défilent horizontalement avec une molette
+              inclinable, un pavé tactile ou <kbd>Maj</kbd> + molette.
+            </p>
+            <label className="field">
+              <span>Distance par cran de la molette de pouce</span>
+              <small className="muted">
+                Plus la valeur est grande, moins il faut tourner la molette. S'applique aux raccourcis
+                de la molette de pouce (voir ci-dessous).
+              </small>
+              <div className="field-row range-row">
+                <input
+                  type="range"
+                  min={HSCROLL_STEP_MIN}
+                  max={HSCROLL_STEP_MAX}
+                  step={20}
+                  value={hscroll.step}
+                  onChange={(e) => changeHscroll({ step: Number(e.target.value) })}
+                />
+                <span className="range-value">{hscroll.step} px</span>
+              </div>
+            </label>
+            <label className="autostart-row">
+              <input
+                type="checkbox"
+                checked={hscroll.smooth}
+                onChange={(e) => changeHscroll({ smooth: e.target.checked })}
+              />
+              <span>Défilement fluide : chaque cran glisse au lieu de sauter</span>
+            </label>
+            <div className="help-block">
+              <b>Molette de pouce Logitech (MX Master…)</b>
+              <p className="muted">
+                Logi Options+ fabrique lui-même le défilement horizontal de la molette de pouce et,
+                dans DevLauncher, ne l'envoie presque jamais (sauf parfois après un clic droit). Pour un
+                défilement fiable, la molette de pouce doit envoyer des raccourcis clavier, que
+                DevLauncher traduit en défilement de la zone sous la souris :
+              </p>
+              <ol>
+                <li>Logi Options+ → la souris → <b>Applications</b> : ajouter DevLauncher.</li>
+                <li>
+                  Pour DevLauncher, <b>Molette de pouce</b> → <b>Personnalisé</b> (raccourci
+                  clavier).
+                </li>
+                <li>
+                  Défiler vers le haut : <kbd>Ctrl</kbd> + <kbd>Maj</kbd> + <kbd>Alt</kbd> +{" "}
+                  <kbd>Windows</kbd> + <kbd>←</kbd>
+                </li>
+                <li>
+                  Défiler vers le bas : <kbd>Ctrl</kbd> + <kbd>Maj</kbd> + <kbd>Alt</kbd> +{" "}
+                  <kbd>Windows</kbd> + <kbd>→</kbd>
+                </li>
+              </ol>
+              <p className="muted">
+                Diagnostic : <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>H</kbd> affiche les événements
+                de molette et de raccourci reçus (journal dans <code>%TEMP%\devlauncher-hwheel.log</code>).
+              </p>
+            </div>
           </>
         )}
 

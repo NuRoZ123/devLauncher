@@ -9,6 +9,12 @@ import { open } from "@tauri-apps/plugin-dialog";
 import type {
   BranchInfo,
   Config,
+  ConflictVersions,
+  FileVersions,
+  LogCommit,
+  Outgoing,
+  MergeState,
+  RemoteBranches,
   DbAlterResult,
   GitChange,
   DbDriver,
@@ -42,29 +48,95 @@ export const api = {
   /** Liste les sous-dossiers directs d'un dossier (typage d'un dossier parent). */
   listSubdirs: (path: string) => invoke<string[]>("list_subdirs", { path }),
 
-  gitInfo: (bash: string, path: string) =>
-    invoke<GitInfo>("git_info", { bash, path }),
-  listBranches: (bash: string, path: string) =>
-    invoke<BranchInfo[]>("list_branches", { bash, path }),
+  gitInfo: (git: string, path: string) =>
+    invoke<GitInfo>("git_info", { git, path }),
+  listBranches: (git: string, path: string) =>
+    invoke<BranchInfo[]>("list_branches", { git, path }),
 
   /** Liste les fichiers modifiés du dépôt (git status). */
-  gitChanges: (bash: string, path: string) =>
-    invoke<GitChange[]>("git_changes", { bash, path }),
+  gitChanges: (git: string, path: string) =>
+    invoke<GitChange[]>("git_changes", { git, path }),
   /** Diff d'un fichier (vs HEAD, ou vs vide si non suivi). */
-  gitDiff: (bash: string, path: string, file: string, untracked: boolean) =>
-    invoke<string>("git_diff", { bash, path, file, untracked }),
+  gitDiff: (git: string, path: string, file: string, untracked: boolean) =>
+    invoke<string>("git_diff", { git, path, file, untracked }),
   /** Ajoute des fichiers à l'index (git add). */
-  gitStage: (bash: string, path: string, files: string[]) =>
-    invoke<void>("git_stage", { bash, path, files }),
+  gitStage: (git: string, path: string, files: string[]) =>
+    invoke<void>("git_stage", { git, path, files }),
+  /** Annule les modifications non indexées (suivis : version de l'index ; non suivis : supprimés). */
+  gitRollback: (git: string, path: string, tracked: string[], untracked: string[]) =>
+    invoke<void>("git_rollback", { git, path, tracked, untracked }),
   /** Retire des fichiers de l'index (git reset). */
-  gitUnstage: (bash: string, path: string, files: string[]) =>
-    invoke<void>("git_unstage", { bash, path, files }),
+  gitUnstage: (git: string, path: string, files: string[]) =>
+    invoke<void>("git_unstage", { git, path, files }),
   /** Valide ce qui est dans l'index (git commit -m). Renvoie la sortie git. */
-  gitCommit: (bash: string, path: string, message: string) =>
-    invoke<string>("git_commit", { bash, path, message }),
+  gitCommit: (git: string, path: string, message: string) =>
+    invoke<string>("git_commit", { git, path, message }),
   /** Pousse la branche courante (git push). Renvoie la sortie git. */
-  gitPush: (bash: string, path: string) =>
-    invoke<string>("git_push", { bash, path }),
+  gitPush: (git: string, path: string) =>
+    invoke<string>("git_push", { git, path }),
+  /** Met à jour la branche courante (git pull --autostash, merge ou rebase). */
+  gitPull: (git: string, path: string, rebase: boolean, remote?: string, branch?: string) =>
+    invoke<string>("git_pull", { git, path, rebase, remote: remote ?? null, branch: branch ?? null }),
+  /** Branches distantes connues (après un git fetch si `fetch`). */
+  gitRemoteBranches: (git: string, path: string, fetch: boolean) =>
+    invoke<RemoteBranches>("git_remote_branches", { git, path, fetch }),
+  /** Opération en cours (merge/rebase…) et fichiers en conflit. */
+  gitMergeState: (git: string, path: string) =>
+    invoke<MergeState>("git_merge_state", { git, path }),
+  /** Versions base / ours / theirs d'un fichier en conflit. */
+  gitConflictVersions: (git: string, path: string, file: string) =>
+    invoke<ConflictVersions>("git_conflict_versions", { git, path, file }),
+  /** Écrit le contenu fusionné d'un fichier et le marque résolu (git add). */
+  gitResolveFile: (git: string, path: string, file: string, content: string) =>
+    invoke<void>("git_resolve_file", { git, path, file, content }),
+  /** Résout des fichiers en prenant un côté entier (stage 2 ou 3). */
+  gitResolveSide: (git: string, path: string, files: string[], side: "ours" | "theirs") =>
+    invoke<void>("git_resolve_side", { git, path, files, side }),
+  /** --continue / --abort / --skip de l'opération en cours. */
+  gitMergeAction: (git: string, path: string, operation: string, action: "continue" | "abort" | "skip") =>
+    invoke<string>("git_merge_action", { git, path, operation, action }),
+
+  /** Historique d'une branche ("--all" : toutes) ou d'un fichier, par pages. */
+  gitLog: (
+    git: string,
+    path: string,
+    rev: string,
+    file: string | null,
+    skip: number,
+    limit: number,
+    search: string | null = null,
+  ) => invoke<LogCommit[]>("git_log", { git, path, rev, file, skip, limit, search }),
+  /** Branches locales et distantes (noms courts). */
+  gitRefs: (git: string, path: string) => invoke<string[]>("git_refs", { git, path }),
+  /** Fichiers suivis du dépôt. */
+  gitLsFiles: (git: string, path: string) => invoke<string[]>("git_ls_files", { git, path }),
+  /** Fichiers modifiés par un commit (vs son 1er parent, "" = commit racine). */
+  gitCommitChanges: (git: string, path: string, hash: string, parent: string) =>
+    invoke<GitChange[]>("git_commit_changes", { git, path, hash, parent }),
+  /** Versions avant (1er parent) / après d'un fichier dans un commit. */
+  gitCommitFileVersions: (git: string, path: string, hash: string, parent: string, file: string, orig: string | null) =>
+    invoke<FileVersions>("git_commit_file_versions", { git, path, hash, parent, file, orig }),
+  /** Diff d'un fichier dans un commit. */
+  gitCommitDiff: (git: string, path: string, hash: string, parent: string, file: string, orig: string | null) =>
+    invoke<string>("git_commit_diff", { git, path, hash, parent, file, orig }),
+  /** Commits non poussés et commits distants à récupérer. */
+  gitOutgoing: (git: string, path: string) => invoke<Outgoing>("git_outgoing", { git, path }),
+  /** Version HEAD et version de travail d'un fichier (vue de comparaison). */
+  /** side : fichier partiellement indexé, "staged" = HEAD ↔ index, "unstaged" = index ↔ travail. */
+  gitFileVersions: (
+    git: string,
+    path: string,
+    file: string,
+    orig: string | null,
+    side?: "staged" | "unstaged",
+  ) => invoke<FileVersions>("git_file_versions", { git, path, file, orig, side: side ?? null }),
+  /** Écrit la version de travail d'un fichier (sans toucher à l'index). */
+  gitWriteWorktreeFile: (git: string, path: string, file: string, content: string) =>
+    invoke<void>("git_write_worktree_file", { git, path, file, content }),
+  /** Vérifie un exécutable git ; renvoie sa version (« git version … »). */
+  checkGit: (git: string) => invoke<string>("check_git", { git }),
+  /** Chemin de git.exe probable (à côté de Git Bash, sinon dans le PATH), "" sinon. */
+  suggestGitPath: (bash: string) => invoke<string>("suggest_git_path", { bash }),
 
   startService: (id: string, cwd: string, command: string, bash: string, port: number | null) =>
     invoke<void>("start_service", { id, cwd, command, bash, port }),
@@ -337,6 +409,16 @@ export function onStatus(cb: (s: StatusEvent) => void): Promise<UnlistenFn> {
 
 export async function pickFolder(title: string): Promise<string | null> {
   const res = await open({ directory: true, multiple: false, title });
+  return typeof res === "string" ? res : null;
+}
+
+export async function pickGitExe(): Promise<string | null> {
+  const res = await open({
+    directory: false,
+    multiple: false,
+    title: "Sélectionner git.exe",
+    filters: [{ name: "Exécutable", extensions: ["exe"] }],
+  });
   return typeof res === "string" ? res : null;
 }
 
