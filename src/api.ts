@@ -6,6 +6,7 @@ import {
   isEnabled as autoIsEnabled,
 } from "@tauri-apps/plugin-autostart";
 import { open } from "@tauri-apps/plugin-dialog";
+import { track } from "./stats";
 import type {
   BranchInfo,
   Config,
@@ -70,13 +71,24 @@ export const api = {
     invoke<void>("git_unstage", { git, path, files }),
   /** Valide ce qui est dans l'index (git commit -m). Renvoie la sortie git. */
   gitCommit: (git: string, path: string, message: string) =>
-    invoke<string>("git_commit", { git, path, message }),
+    invoke<string>("git_commit", { git, path, message }).then((r) => (track.commit(), r)),
   /** Pousse la branche courante (git push). Renvoie la sortie git. */
   gitPush: (git: string, path: string) =>
-    invoke<string>("git_push", { git, path }),
+    invoke<string>("git_push", { git, path }).then(async (r) => {
+      // Succès « Sans filet » : push sur la branche par défaut du dépôt.
+      const onDefault = await invoke<boolean>("git_on_default_branch", { git, path }).catch(() => false);
+      track.push(onDefault);
+      return r;
+    }),
   /** Met à jour la branche courante (git pull --autostash, merge ou rebase). */
   gitPull: (git: string, path: string, rebase: boolean, remote?: string, branch?: string) =>
-    invoke<string>("git_pull", { git, path, rebase, remote: remote ?? null, branch: branch ?? null }),
+    invoke<string>("git_pull", { git, path, rebase, remote: remote ?? null, branch: branch ?? null }).then(
+      (r) => (track.pull(true), r),
+      (e) => {
+        track.pull(false);
+        throw e;
+      },
+    ),
   /** Branches distantes connues (après un git fetch si `fetch`). */
   gitRemoteBranches: (git: string, path: string, fetch: boolean) =>
     invoke<RemoteBranches>("git_remote_branches", { git, path, fetch }),
@@ -88,10 +100,10 @@ export const api = {
     invoke<ConflictVersions>("git_conflict_versions", { git, path, file }),
   /** Écrit le contenu fusionné d'un fichier et le marque résolu (git add). */
   gitResolveFile: (git: string, path: string, file: string, content: string) =>
-    invoke<void>("git_resolve_file", { git, path, file, content }),
+    invoke<void>("git_resolve_file", { git, path, file, content }).then(() => track.conflicts([file])),
   /** Résout des fichiers en prenant un côté entier (stage 2 ou 3). */
   gitResolveSide: (git: string, path: string, files: string[], side: "ours" | "theirs") =>
-    invoke<void>("git_resolve_side", { git, path, files, side }),
+    invoke<void>("git_resolve_side", { git, path, files, side }).then(() => track.conflicts(files)),
   /** --continue / --abort / --skip de l'opération en cours. */
   gitMergeAction: (git: string, path: string, operation: string, action: "continue" | "abort" | "skip") =>
     invoke<string>("git_merge_action", { git, path, operation, action }),
@@ -105,14 +117,19 @@ export const api = {
     skip: number,
     limit: number,
     search: string | null = null,
-  ) => invoke<LogCommit[]>("git_log", { git, path, rev, file, skip, limit, search }),
+  ) =>
+    invoke<LogCommit[]>("git_log", { git, path, rev, file, skip, limit, search }).then((r) => {
+      // Page incomplète sur l'historique complet d'une branche : premier commit atteint.
+      if (!file && !search && r.length < limit && skip + r.length > 0) track.reachedRoot();
+      return r;
+    }),
   /** Branches locales et distantes (noms courts). */
   gitRefs: (git: string, path: string) => invoke<string[]>("git_refs", { git, path }),
   /** Fichiers suivis du dépôt. */
   gitLsFiles: (git: string, path: string) => invoke<string[]>("git_ls_files", { git, path }),
   /** Fichiers modifiés par un commit (vs son 1er parent, "" = commit racine). */
   gitCommitChanges: (git: string, path: string, hash: string, parent: string) =>
-    invoke<GitChange[]>("git_commit_changes", { git, path, hash, parent }),
+    invoke<GitChange[]>("git_commit_changes", { git, path, hash, parent }).then((r) => (track.count("commitsViewed"), r)),
   /** Versions avant (1er parent) / après d'un fichier dans un commit. */
   gitCommitFileVersions: (git: string, path: string, hash: string, parent: string, file: string, orig: string | null) =>
     invoke<FileVersions>("git_commit_file_versions", { git, path, hash, parent, file, orig }),
@@ -139,7 +156,7 @@ export const api = {
   suggestGitPath: (bash: string) => invoke<string>("suggest_git_path", { bash }),
 
   startService: (id: string, cwd: string, command: string, bash: string, port: number | null) =>
-    invoke<void>("start_service", { id, cwd, command, bash, port }),
+    invoke<void>("start_service", { id, cwd, command, bash, port }).then(() => track.count("services")),
   stopService: (id: string) => invoke<void>("stop_service", { id }),
   runAction: (runId: string, target: string, cwd: string, command: string, bash: string) =>
     invoke<number>("run_action", { runId, target, cwd, command, bash }),
@@ -202,7 +219,7 @@ export const api = {
     database: string,
     sql: string,
   ) =>
-    invoke<DbSqlResult[]>("db_query", { driver, host, port, user, password, database, sql }),
+    invoke<DbSqlResult[]>("db_query", { driver, host, port, user, password, database, sql }).then((r) => (track.count("sqlQueries"), r)),
 
   /** Lit les premières lignes d'une table (bornées par `limit`). Tri optionnel
    *  par `orderBy` (nom de colonne) dans le sens `orderDir` (asc / desc). */

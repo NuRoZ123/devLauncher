@@ -77,6 +77,8 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { parseEnv } from "./env";
 import { basename, dirname, samePath } from "./paths";
+import { StatsToasts, StatsView, TrophyButton } from "./components/StatsView";
+import { setNotify, track as trackStats, useStats } from "./stats";
 import { getHScrollSettings, setHScrollSettings, HSCROLL_STEP_MAX, HSCROLL_STEP_MIN } from "./wheel";
 import type {
   ActionDef,
@@ -337,7 +339,7 @@ export default function App() {
   const [updateDismissed, setUpdateDismissed] = useState(false);
   /** Téléchargement de l'installeur : nom en cours, chemin final, ou erreur. */
   const [dl, setDl] = useState<{ busy?: string; done?: string; error?: string }>({});
-  const [view, setView] = useState<"dashboard" | "settings">("dashboard");
+  const [view, setView] = useState<"dashboard" | "settings" | "stats">("dashboard");
   // Page de détail d'un projet : suivi par chemin (stable même si le type/id change).
   const [detailPath, setDetailPath] = useState<string | null>(null);
   // Page des modifications git d'un projet (clic sur la pastille « non commité »).
@@ -445,6 +447,9 @@ export default function App() {
     [],
   );
   const [running, setRunning] = useState<Set<string>>(new Set());
+  // Statistiques : temps de service par projet, nombre de projets (badge).
+  useEffect(() => trackStats.setRunning([...running]), [running]);
+  useEffect(() => trackStats.setProjectCount(projects.length), [projects.length]);
   const [busy, setBusy] = useState<Record<string, string>>({});
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
@@ -600,7 +605,7 @@ export default function App() {
       // BDD ouverte et visible : Échap la réduit (conserve onglets + saisies).
       if (dbWs && !dbWsHidden) setDbWsHidden(true);
       else if (jobsOpen) setJobsOpen(false);
-      else if (view === "settings") setView("dashboard");
+      else if (view !== "dashboard") setView("dashboard");
       else if (gitChangesPath) setGitChangesPath(null);
       else if (detailPath) setDetailPath(null);
     };
@@ -3241,6 +3246,7 @@ export default function App() {
 
   return (
     <div className="app">
+      <StatsToasts onOpen={() => setView("stats")} />
       {!config.git_path?.trim() && !gitAskDismissed && (
         <GitPathModal
           bash={bash}
@@ -3315,6 +3321,10 @@ export default function App() {
           <span className="brand-version" title={`Version ${__APP_VERSION__}`}>
             v{__APP_VERSION__}
           </span>
+          <TrophyButton
+            active={view === "stats"}
+            onClick={() => setView((v) => (v === "stats" ? "dashboard" : "stats"))}
+          />
         </div>
         <div className="topbar-stats">
           {scanning && (
@@ -3331,7 +3341,7 @@ export default function App() {
               e.preventDefault();
               openStartCommand();
             }}
-            disabled={view === "settings" || !canStartAny}
+            disabled={view !== "dashboard" || !canStartAny}
             title={`Commande par défaut : ${startCmd || "non définie"} — clic droit pour la modifier`}
           >
             ▶ Tout démarrer
@@ -3339,14 +3349,14 @@ export default function App() {
           <button
             className="btn btn-stop"
             onClick={stopAll}
-            disabled={view === "settings" || !canStopAny}
+            disabled={view !== "dashboard" || !canStopAny}
           >
             ■ Tout arrêter
           </button>
           <button
             className="btn btn-ghost"
             onClick={restartAll}
-            disabled={view === "settings" || !canStopAny}
+            disabled={view !== "dashboard" || !canStopAny}
             title="Redémarrer tous les services actuellement allumés"
           >
             ⟳ Tout redémarrer
@@ -3354,7 +3364,7 @@ export default function App() {
           <button
             className="btn btn-warn"
             onClick={freeAllPorts}
-            disabled={view === "settings" || orphanPorts.length === 0}
+            disabled={view !== "dashboard" || orphanPorts.length === 0}
             title="Tuer les process externes qui occupent les ports de tes services"
           >
             ⚠ Libérer tout{orphanPorts.length > 0 ? ` (${orphanPorts.length})` : ""}
@@ -3362,7 +3372,7 @@ export default function App() {
           <div className="dropdown">
             <button
               className="btn btn-ghost"
-              disabled={view === "settings"}
+              disabled={view !== "dashboard"}
               onClick={() => setSeqMenuOpen((o) => !o)}
               title="Lancer une séquence sur plusieurs services"
             >
@@ -3437,6 +3447,8 @@ export default function App() {
           onPersist={persist}
           onClose={() => setView("dashboard")}
         />
+      ) : view === "stats" ? (
+        <StatsView projects={allProjects} onClose={() => setView("dashboard")} />
       ) : gitChangesProject ? (
         <GitChangesView
           key={gitChangesProject.id}
@@ -3451,6 +3463,12 @@ export default function App() {
           onChangelists={(next) => {
             const cfg = configRef.current;
             if (!cfg) return;
+            // Succès « Ménage » : la liste « Ne jamais committer » se vide.
+            const excludedFiles = (c?: typeof next) => {
+              const ids = new Set((c?.lists ?? []).filter((l) => l.excluded).map((l) => l.id));
+              return Object.values(c?.files ?? {}).filter((id) => ids.has(id)).length;
+            };
+            if (excludedFiles(cfg.changelists?.[gitChangesProject.id]) > 0 && excludedFiles(next) === 0) trackStats.cleanup();
             const updated: Config = {
               ...cfg,
               changelists: { ...(cfg.changelists ?? {}), [gitChangesProject.id]: next },
@@ -3938,6 +3956,8 @@ function SettingsView({
   const [autoStart, setAutoStart] = useState(false);
   // Réglages de défilement horizontal : propres au poste (localStorage), appliqués aussitôt.
   const [hscroll, setHscroll] = useState(getHScrollSettings);
+  // Réglage stocké dans stats.json, appliqué immédiatement (hors brouillon).
+  const statsNotify = useStats().notify;
   const changeHscroll = (p: Partial<typeof hscroll>) => {
     setHScrollSettings(p);
     setHscroll(getHScrollSettings());
@@ -4130,6 +4150,14 @@ function SettingsView({
                 onChange={(e) => toggleAutoStart(e.target.checked)}
               />
               <span>Lancer DevLauncher au démarrage de Windows</span>
+            </label>
+            <label className="autostart-row">
+              <input
+                type="checkbox"
+                checked={statsNotify}
+                onChange={(e) => setNotify(e.target.checked)}
+              />
+              <span>Notifier les badges et succès débloqués (page 🏆)</span>
             </label>
 
             <h2>Souris : défilement horizontal</h2>

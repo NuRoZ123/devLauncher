@@ -794,6 +794,33 @@ fn save_config(app: AppHandle, config: Config) -> Result<(), String> {
     Ok(())
 }
 
+/// Statistiques d'usage (temps, compteurs, badges) : fichier séparé de la
+/// config, écrit souvent et au format libre (géré côté front).
+fn stats_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(config_path(app)?.with_file_name("stats.json"))
+}
+
+#[tauri::command]
+fn load_stats(app: AppHandle) -> Result<Option<serde_json::Value>, String> {
+    let p = stats_path(&app)?;
+    if !p.exists() {
+        return Ok(None);
+    }
+    let s = std::fs::read_to_string(&p).map_err(|e| e.to_string())?;
+    Ok(serde_json::from_str(&s).ok())
+}
+
+#[tauri::command]
+fn save_stats(app: AppHandle, stats: serde_json::Value) -> Result<(), String> {
+    let p = stats_path(&app)?;
+    let json = serde_json::to_string(&stats).map_err(|e| e.to_string())?;
+    // Écriture via fichier temporaire : pas de fichier tronqué si l'app est tuée.
+    let tmp = p.with_extension("json.tmp");
+    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &p).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Détection du port d'un service
 // ---------------------------------------------------------------------------
@@ -2106,6 +2133,39 @@ async fn git_push(git: String, path: String) -> Result<String, String> {
             }
             Err(e) => Err(e),
         }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// La branche courante est-elle la branche par défaut du remote (origin/HEAD) ?
+/// Sert au succès « Sans filet » (push direct sur la branche par défaut).
+#[tauri::command]
+async fn git_on_default_branch(git: String, path: String) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let cur = git_read(&git, &path, &["rev-parse", "--abbrev-ref", "HEAD"])?.trim().to_string();
+        if cur.is_empty() || cur == "HEAD" {
+            return Ok(false);
+        }
+        let remote = {
+            let r = git_read(&git, &path, &["config", &format!("branch.{cur}.remote")])?;
+            let r = r.trim();
+            if r.is_empty() { "origin".to_string() } else { r.to_string() }
+        };
+        // Référence locale origin/HEAD (posée au clone) ; sinon on interroge le remote.
+        let local = git_read(&git, &path, &["symbolic-ref", "--short", &format!("refs/remotes/{remote}/HEAD")])?;
+        let default = match local.trim().strip_prefix(&format!("{remote}/")) {
+            Some(b) if !b.is_empty() => b.to_string(),
+            _ => {
+                let out = git_read(&git, &path, &["ls-remote", "--symref", &remote, "HEAD"])?;
+                out.lines()
+                    .find_map(|l| l.strip_prefix("ref: refs/heads/"))
+                    .and_then(|l| l.split('\t').next())
+                    .unwrap_or("")
+                    .to_string()
+            }
+        };
+        Ok(!default.is_empty() && default == cur)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -7001,6 +7061,9 @@ pub fn run() {
             hwheel_log,
             load_config,
             save_config,
+            load_stats,
+            save_stats,
+            git_on_default_branch,
             scan_projects,
             list_subdirs,
             git_info,
