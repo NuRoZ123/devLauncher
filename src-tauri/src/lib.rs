@@ -208,8 +208,6 @@ struct StatusEvent {
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 struct Config {
-    #[serde(default)]
-    projects_root: String,
     /// Sources des projets (projets uniques et dossiers parents typés). Opaque
     /// côté Rust (round-trip JSON) : interprétée par l'interface, et repassée
     /// typée à `scan_projects`.
@@ -245,11 +243,6 @@ struct Config {
     /// (sinon elles réapparaissent après suppression à chaque redémarrage).
     #[serde(default)]
     actions_seeded: bool,
-    /// Vrai une fois les sources initialisées (migration de l'ancienne racine
-    /// unique effectuée, ou config créée directement avec des sources) : évite de
-    /// re-migrer si l'utilisateur retire ensuite toutes ses sources.
-    #[serde(default)]
-    sources_migrated: bool,
     /// Connexions BDD par service : id de projet → mapping des clés .env
     /// (host/port/user/password/database). Aucun identifiant stocké, juste les
     /// noms de clés .env, pour pouvoir se reconnecter à la réouverture.
@@ -3123,7 +3116,7 @@ fn dep_lookup(pkg: &Path, dep: &str) -> (bool, Option<String>, Option<String>) {
 }
 
 /// Référence d'un service transmise par l'interface (elle possède déjà la liste
-/// des projets scannés) : évite de re-scanner un dossier `services/` en dur.
+/// des projets scannés) : évite de re-scanner un dossier en dur.
 #[derive(Deserialize)]
 struct ServiceRef {
     id: String,

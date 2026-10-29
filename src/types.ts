@@ -554,12 +554,6 @@ export interface ProjectFolder {
 }
 
 export interface Config {
-  /**
-   * Ancienne racine unique (archi services/ + packages/ + portail-occupant).
-   * Conservée pour la rétrocompat et la migration vers `sources` ; n'est plus
-   * utilisée pour le scan une fois les sources renseignées.
-   */
-  projects_root: string;
   /** Sources des projets : projets uniques et/ou dossiers parents typés. */
   sources: ProjectSource[];
   git_bash_path: string;
@@ -581,12 +575,6 @@ export interface Config {
   action_colors: Record<string, string>;
   /** Vrai une fois les actions par défaut semées (évite leur réapparition). */
   actions_seeded: boolean;
-  /**
-   * Vrai une fois les sources initialisées (migration de l'ancienne racine
-   * effectuée, ou config créée avec des sources) : évite de re-migrer si
-   * l'utilisateur retire ensuite toutes ses sources.
-   */
-  sources_migrated?: boolean;
   /** Connexions BDD par service : id de projet → mapping des clés .env. */
   db_connections: Record<string, DbConnection>;
   /** Nombre de lignes affichées par défaut dans l'aperçu d'une table. */

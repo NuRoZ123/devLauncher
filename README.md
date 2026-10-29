@@ -8,10 +8,9 @@ Thème **dark**, binaire léger (WebView2 natif de Windows).
 
 ## Fonctionnalités
 
-- **Détection auto** des projets sous la racine choisie :
-  - `services/*` → chaque dossier est une API
-  - `portail-occupant/` → le front
-  - `packages/*` → librairies (affichées, sans démarrage)
+- **Sources de projets configurables** : projet unique ou dossier parent
+  typé (service, front, package, full-stack) dont chaque sous-dossier est un
+  projet.
 - **Commande de démarrage** : tous les projets démarrables utilisent la
   commande par défaut configurée (ex. `npm run start`, `./startup.sh`), avec
   possibilité d'**exceptions par projet** (un service ou le front peut avoir
@@ -48,8 +47,7 @@ npm run tauri dev
 ```
 
 Au **premier démarrage**, l'app demande :
-1. le **dossier racine** des projets (celui qui contient `services/`,
-   `packages/`, `portail-occupant/`) ;
+1. les **sources de projets** (projets uniques et/ou dossiers parents typés) ;
 2. le **chemin de Git Bash** (par défaut `C:\Program Files\Git\bin\bash.exe`) ;
 3. la **commande de démarrage par défaut** (ex. `npm run start`,
    `./startup.sh`). Si une config existante n'en a pas, cet écran réapparaît

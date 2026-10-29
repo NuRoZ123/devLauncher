@@ -171,38 +171,6 @@ const NO_LINKS: Record<string, string> = {};
 const NO_SOURCES: ProjectSource[] = [];
 const KIND_ORDER: ProjectKind[] = ["fullstack", "service", "front", "package"];
 
-/** Assemble un chemin en respectant le séparateur du dossier racine. */
-function joinPath(root: string, sub: string): string {
-  const sep = root.includes("/") && !root.includes("\\") ? "/" : "\\";
-  return root.replace(/[\\/]+$/, "") + sep + sub;
-}
-
-/**
- * Migration des anciennes configs (racine unique) vers des sources : reproduit
- * l'archi historique — `services/` (dossier parent, type service),
- * `portail-occupant` (projet front), `packages/` (dossier parent, type package).
- * Les sources vers un dossier absent ne produisent rien au scan.
- */
-function migrateSources(root: string): ProjectSource[] {
-  if (!root.trim()) return [];
-  return [
-    {
-      id: "legacy-services",
-      path: joinPath(root, "services"),
-      mode: "parent",
-      defaultType: "service",
-      overrides: {},
-    },
-    { id: "legacy-front", path: joinPath(root, "portail-occupant"), mode: "single", type: "front" },
-    {
-      id: "legacy-packages",
-      path: joinPath(root, "packages"),
-      mode: "parent",
-      defaultType: "package",
-      overrides: {},
-    },
-  ];
-}
 const KIND_TITLE: Record<ProjectKind, string> = {
   fullstack: "Full-stack",
   service: "Services",
@@ -673,22 +641,15 @@ export default function App() {
     api.loadConfig().then((c) => {
       // La commande de démarrage fait partie de la config minimale : si elle
       // manque (ancienne config), on repasse par l'écran Setup pré-rempli.
-      // (On ne dépend plus de projects_root : les nouvelles configs n'en ont pas.)
       if (c && c.start_command) {
         // Les actions par défaut ne sont semées qu'une seule fois : après quoi
         // le drapeau est persisté, et les suppressions de l'utilisateur tiennent.
         const alreadySeeded = c.actions_seeded ?? false;
-        // Migration à effectuer : jamais migré, aucune source, mais une ancienne
-        // racine unique existe. Une fois migré (drapeau posé), on ne re-migre pas,
-        // même si l'utilisateur retire ensuite toutes ses sources.
-        const needsMigration = !c.sources_migrated && !c.sources?.length && !!c.projects_root;
         // Spread d'abord : préserve tout champ non listé ici (ex. db_layouts),
         // qui serait sinon perdu au démarrage puis effacé à la 1re écriture.
         const next: Config = {
           ...c,
-          projects_root: c.projects_root,
-          sources: needsMigration ? migrateSources(c.projects_root) : (c.sources ?? []),
-          sources_migrated: true,
+          sources: c.sources ?? [],
           git_bash_path: c.git_bash_path || DEFAULT_GIT_BASH,
           start_command: c.start_command,
           command_overrides: c.command_overrides ?? NO_OVERRIDES,
@@ -702,8 +663,8 @@ export default function App() {
           db_disabled: c.db_disabled ?? {},
         };
         setConfig(next);
-        // Fige le semis d'actions et/ou la migration des sources dès le 1er lancement.
-        if (!alreadySeeded || needsMigration) void api.saveConfig(next);
+        // Fige le semis d'actions dès le 1er lancement.
+        if (!alreadySeeded) void api.saveConfig(next);
       } else if (c) {
         setPartialConfig(c);
       }
@@ -2547,9 +2508,7 @@ export default function App() {
       // (cas d'une ancienne config sans commande de démarrage).
       await persist({
         ...partialConfig,
-        projects_root: partialConfig?.projects_root ?? "",
         sources: srcs,
-        sources_migrated: true,
         git_bash_path: b,
         git_path: g,
         start_command: cmd,
@@ -3994,7 +3953,6 @@ function SettingsView({
     setPending(false);
     await onPersist({
       ...d,
-      projects_root: d.projects_root.trim(),
       git_bash_path: d.git_bash_path.trim(),
       git_path: (d.git_path ?? "").trim(),
       start_command: d.start_command.trim(),
