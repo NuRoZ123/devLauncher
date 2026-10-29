@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import type { DbDriver, DbEditor, DbFkRef, DbRowUpdate } from "../types";
 
 export interface DbDataState {
@@ -128,6 +128,11 @@ export function DbTableDataView({
 
   const [filterDraft, setFilterDraft] = useState(state.filter);
   useEffect(() => setFilterDraft(state.filter), [state.filter]);
+  const filterRef = useRef<HTMLInputElement | null>(null);
+
+  // Menu ouvert au clic sur un en-tête de colonne : conditions de filtre
+  // pré-remplies + tri.
+  const [colMenu, setColMenu] = useState<{ col: string; left: number; top: number } | null>(null);
 
   // Sélection de lignes (indices) + ancre pour la sélection Shift.
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -639,15 +644,102 @@ export function DbTableDataView({
     if (state.filter) onFilterChange("");
   };
 
-  // Clic sur un en-tête de colonne : cycle asc → desc → aucun tri.
+  // Clic gauche sur un en-tête de colonne : cycle asc → desc → aucun tri.
   const cycleSort = (col: string) => {
     if (state.orderBy !== col) onSort(col, "asc");
     else if (state.orderDir === "asc") onSort(col, "desc");
     else onSort(null, "asc");
   };
 
+  // Ajoute « col op » au filtre (après un AND s'il n'est pas vide) puis donne
+  // le focus au champ pour saisir directement la valeur. LIKE / ILIKE sont
+  // pré-remplis avec leurs guillemets (et % pour ILIKE), curseur au milieu.
+  const insertCondition = (col: string, op: string) => {
+    setColMenu(null);
+    const base = filterDraft.trim();
+    const [before, after] = op === "LIKE" ? ["'", "'"] : op === "ILIKE" ? ["'%", "%'"] : ["", ""];
+    const head = (base ? `${base} AND ` : "") + `${col} ${op} ${before}`;
+    const next = head + after;
+    setFilterDraft(next);
+    requestAnimationFrame(() => {
+      const el = filterRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(head.length, head.length);
+    });
+  };
+
+  // Clic droit sur un en-tête : menu ouvert à la position de la souris.
+  const openColMenu = (col: string, e: ReactMouseEvent<HTMLElement>) => {
+    e.preventDefault();
+    const W = 220;
+    const H = 300;
+    setColMenu({
+      col,
+      left: Math.max(4, Math.min(e.clientX, window.innerWidth - W - 8)),
+      top: Math.max(4, Math.min(e.clientY, window.innerHeight - H - 8)),
+    });
+  };
+
   return (
     <div className="dbdata-embed">
+        {colMenu && (
+          <>
+            <div
+              className="dropdown-backdrop"
+              onClick={() => setColMenu(null)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setColMenu(null);
+              }}
+            />
+            <div
+              className="context-menu"
+              style={{ position: "fixed", left: colMenu.left, top: colMenu.top, width: 220 }}
+            >
+              <div className="menu-title">{colMenu.col}</div>
+              {["=", "<>", ">", "<", "LIKE", "ILIKE"].map((op) => (
+                <button
+                  key={op}
+                  className="menu-item dbdata-colmenu-op"
+                  onClick={() => insertCondition(colMenu.col, op)}
+                >
+                  {colMenu.col} {op} {op === "LIKE" ? "'..'" : op === "ILIKE" ? "'%..%'" : ".."}
+                </button>
+              ))}
+              <div className="menu-sep" />
+              <button
+                className="menu-item"
+                onClick={() => {
+                  setColMenu(null);
+                  onSort(colMenu.col, "asc");
+                }}
+              >
+                ▲ Trier croissant
+              </button>
+              <button
+                className="menu-item"
+                onClick={() => {
+                  setColMenu(null);
+                  onSort(colMenu.col, "desc");
+                }}
+              >
+                ▼ Trier décroissant
+              </button>
+              {state.orderBy === colMenu.col && (
+                <button
+                  className="menu-item"
+                  onClick={() => {
+                    setColMenu(null);
+                    onSort(null, "asc");
+                  }}
+                >
+                  Retirer le tri
+                </button>
+              )}
+            </div>
+          </>
+        )}
         <div className="dbdata-head">
           <div className="dbdata-title">
             {canBack && (
@@ -696,6 +788,7 @@ export function DbTableDataView({
 
         <div className="dbdata-toolbar">
           <input
+            ref={filterRef}
             className="dbdata-filter"
             placeholder="Filtrer :  id = 1   ·   id in (1,2,3) AND softDelete = false   ·   name ILIKE '%a%'"
             title={
@@ -861,9 +954,10 @@ export function DbTableDataView({
                           className={"dbdata-th-sort" + (sorted ? " dbdata-sorted" : "")}
                           title={
                             (state.types[ci] ? `${c} · ${state.types[ci]}` : c) +
-                            " — cliquer pour trier (asc / desc / aucun)"
+                            " — clic : trier (asc / desc / aucun) · clic droit : filtrer"
                           }
                           onClick={() => cycleSort(c)}
+                          onContextMenu={(e) => openColMenu(c, e)}
                         >
                           <span className="dbdata-col-name">{c}</span>
                           {state.types[ci] && (

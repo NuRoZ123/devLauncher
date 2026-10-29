@@ -2485,7 +2485,7 @@ button.db-table {
   white-space: nowrap;
   vertical-align: bottom;
 }
-/* En-tête triable : clic pour cycler asc → desc → aucun. */
+/* En-tête triable : clic pour cycler asc → desc → aucun, clic droit = menu filtre. */
 .dbdata-th-sort {
   cursor: pointer;
   user-select: none;
@@ -5849,4 +5849,10 @@ button.db-table {
   border-radius: 50%;
   background: #e3b341;
   box-shadow: 0 0 0 2px var(--bg, #0d1117);
+}
+
+/* Menu de colonne (table BDD) : conditions de filtre pré-remplies. */
+.dbdata-colmenu-op {
+  font-family: var(--mono, ui-monospace, Consolas, monospace);
+  font-size: 12px;
 }
