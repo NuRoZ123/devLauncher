@@ -39,6 +39,16 @@ import { GeneralSequenceModal } from "./components/GeneralSequenceModal";
 import { checkForUpdate, type UpdateAsset, type UpdateInfo } from "./update";
 import { expandActions, isSequenceValid } from "./sequences";
 import {
+  buildBindables,
+  comboFromEvent,
+  comboKeys,
+  isCapturing,
+  isStrongCombo,
+  isTypingTarget,
+  type BindTarget,
+} from "./keybindings";
+import { KeybindingsSettings } from "./components/KeybindingsSettings";
+import {
   resolveLayout,
   createFolder as createFolderLayout,
   deleteFolder as deleteFolderLayout,
@@ -445,6 +455,21 @@ export default function App() {
   });
   const mainRef = useRef<HTMLDivElement>(null);
   const draggingSplit = useRef(false);
+  // Liste des projets repliée : la console occupe toute la largeur (mémorisé).
+  const [projectsHidden, setProjectsHidden] = useState(() => {
+    try {
+      return localStorage.getItem("dl.projectsHidden") === "1";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("dl.projectsHidden", projectsHidden ? "1" : "0");
+    } catch {
+      /* stockage indisponible : état non mémorisé */
+    }
+  }, [projectsHidden]);
 
   // Repli progressif des lignes de projet selon la largeur du volet. La mesure est
   // recalculée à chaque changement de `splitPct` (glissement du splitter → re-rendu
@@ -469,7 +494,7 @@ export default function App() {
   // peinture, pas de scintillement.
   useLayoutEffect(() => {
     measurePanel();
-  }, [measurePanel, splitPct, view, detailPath, projects.length]);
+  }, [measurePanel, splitPct, view, detailPath, projects.length, projectsHidden]);
   useEffect(() => {
     const el = projectsRef.current;
     if (!el) return;
@@ -2955,6 +2980,131 @@ export default function App() {
   const serviceSequences = useMemo(() => sequences.filter((s) => !s.global), [sequences]);
   const globalSequences = useMemo(() => sequences.filter((s) => !!s.global), [sequences]);
 
+  // ----- Raccourcis clavier personnalisés (« macros ») -----
+  // Libellé de la dernière macro déclenchée (bulle éphémère) ; `n` relance l'animation.
+  const [kbFlash, setKbFlash] = useState<{ label: string; n: number } | null>(null);
+  useEffect(() => {
+    if (!kbFlash) return;
+    const t = setTimeout(() => setKbFlash(null), 1400);
+    return () => clearTimeout(t);
+  }, [kbFlash]);
+
+  const runBinding = (target: BindTarget) => {
+    if (target.t === "app") {
+      switch (target.cmd) {
+        case "startAll":
+          return startAll();
+        case "stopAll":
+          return stopAll();
+        case "restartAll":
+          return restartAll();
+        case "freePorts":
+          return void freeAllPorts();
+        case "rescan":
+          return void rescan();
+        case "jobs":
+          return setJobsOpen((o) => !o);
+        case "settings":
+          return setView((v) => (v === "settings" ? "dashboard" : "settings"));
+        case "stats":
+          return setView((v) => (v === "stats" ? "dashboard" : "stats"));
+        case "projectsPanel":
+          setGitChangesPath(null);
+          setDetailPath(null);
+          setView("dashboard");
+          return setProjectsHidden((h) => !h);
+        case "dashboard":
+          setGitChangesPath(null);
+          setDetailPath(null);
+          return setView("dashboard");
+      }
+    }
+    if (target.t === "gseq") {
+      const s = globalSequences.find((x) => x.id === target.seqId);
+      if (s && isSequenceValid(s, allActions, sequences)) setGeneralSeq(s);
+      return;
+    }
+    const p = allProjects.find((x) => x.id === target.pid);
+    if (!p) return;
+    if (target.t === "projAction") {
+      const a = resolveAction(target.actionId);
+      if (!a) return;
+      if (a.needsBranch) void checkout(p);
+      else runActionOn(p, a);
+      return;
+    }
+    if (target.t === "projSeq") {
+      const s = serviceSequences.find((x) => x.id === target.seqId);
+      if (s) void runSequenceOn(p, s);
+      return;
+    }
+    const stack = p.kind === "fullstack";
+    const isRunning = stack
+      ? (p.children ?? []).some((c) => running.has(c.id))
+      : running.has(p.id);
+    const start = () => (stack ? onStartGroup(p) : !isRunning && !busy[p.id] && onStartRow(p));
+    const stop = () => (stack ? onStopGroup(p) : isRunning && onStopRow(p));
+    switch (target.cmd) {
+      case "start":
+        return void start();
+      case "stop":
+        return void stop();
+      case "toggle":
+        return void (isRunning ? stop() : start());
+      case "console":
+        setView("dashboard");
+        return onOpenConsoleRow(p);
+      case "detail":
+        setView("dashboard");
+        return openDetail(p);
+      case "git":
+        setView("dashboard");
+        return openGitChanges(p);
+      case "db":
+        return void openDbWorkspace(p);
+    }
+  };
+
+  const bindables = useMemo(
+    () =>
+      buildBindables(allProjects, allActions, sequences, (pid) => !!config?.db_connections?.[pid]),
+    [allProjects, allActions, sequences, config?.db_connections],
+  );
+  // Combinaison → action, recalculé à chaque rendu ; le listener lit la version courante.
+  const kbRef = useRef<(e: KeyboardEvent) => void>(() => {});
+  kbRef.current = (e: KeyboardEvent) => {
+    const keys = config?.keybindings;
+    if (!keys || isCapturing() || e.repeat) return;
+    const combo = comboFromEvent(e);
+    if (!combo) return;
+    // Dans un champ de saisie, seules les combinaisons « fortes » déclenchent une macro.
+    if (isTypingTarget(document.activeElement) && !isStrongCombo(combo)) return;
+    const id = Object.keys(keys).find((k) => keys[k] === combo);
+    const b = id && bindables.find((x) => x.id === id);
+    if (!b) return;
+    e.preventDefault();
+    e.stopPropagation();
+    runBinding(b.target);
+    trackStats.macro(comboKeys(combo).length);
+    setKbFlash((f) => ({
+      label: b.group === "app" || b.group === "gseq" ? b.label : `${b.groupLabel} · ${b.label}`,
+      n: (f?.n ?? 0) + 1,
+    }));
+  };
+  // Succès / badges liés aux raccourcis : nombre attribué (hors obsolètes) et
+  // couverture complète des actions globales.
+  useEffect(() => {
+    const keys = config?.keybindings ?? {};
+    const live = bindables.filter((b) => keys[b.id]);
+    const globals = bindables.filter((b) => b.group === "app");
+    trackStats.setBindings(live.length, globals.every((b) => keys[b.id]));
+  }, [config?.keybindings, bindables]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => kbRef.current(e);
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
+
   // Télécharge un installeur de mise à jour sans ouvrir le navigateur.
   const downloadUpdate = useCallback(async (asset: UpdateAsset) => {
     setDl({ busy: asset.name });
@@ -3206,6 +3356,11 @@ export default function App() {
   return (
     <div className="app">
       <StatsToasts onOpen={() => setView("stats")} />
+      {kbFlash && (
+        <div className="kb-flash" key={kbFlash.n}>
+          ⌨ {kbFlash.label}
+        </div>
+      )}
       {!config.git_path?.trim() && !gitAskDismissed && (
         <GitPathModal
           bash={bash}
@@ -3468,7 +3623,27 @@ export default function App() {
         />
       ) : (
         <div className="main" ref={mainRef}>
-          <section className="projects" ref={projectsRef} style={{ width: `${splitPct}%` }}>
+          {/* Masquée plutôt que démontée : défilement et état du glisser-déposer conservés. */}
+          <section
+            className="projects"
+            ref={projectsRef}
+            style={{ width: `${splitPct}%`, display: projectsHidden ? "none" : undefined }}
+          >
+            <div className="projects-head">
+              {/* Ligne cliquable au-dessus des projets : créer un dossier virtuel. */}
+              {projects.length > 0 && (
+                <button className="add-folder-line" onClick={onNewFolder}>
+                  <span className="add-folder-plus">+</span> Nouveau dossier
+                </button>
+              )}
+              <button
+                className="projects-collapse"
+                onClick={() => setProjectsHidden(true)}
+                title="Masquer la liste des projets (console en pleine largeur)"
+              >
+                «
+              </button>
+            </div>
             {scanError && <div className="banner-error">{scanError}</div>}
 
             {scanning && projects.length === 0 && (
@@ -3478,12 +3653,6 @@ export default function App() {
               </div>
             )}
 
-            {/* Ligne cliquable au-dessus des projets : créer un dossier virtuel. */}
-            {projects.length > 0 && (
-              <button className="add-folder-line" onClick={onNewFolder}>
-                <span className="add-folder-plus">+</span> Nouveau dossier
-              </button>
-            )}
             {projects.length > 0 && (
               <DndContext
                 sensors={sensors}
@@ -3567,7 +3736,9 @@ export default function App() {
             )}
           </section>
 
-          <div className="splitter" onMouseDown={startSplit} title="Glisser pour redimensionner" />
+          {!projectsHidden && (
+            <div className="splitter" onMouseDown={startSplit} title="Glisser pour redimensionner" />
+          )}
 
           <section className="console-pane">
             <Console
@@ -3577,6 +3748,9 @@ export default function App() {
               lines={activeConsole ? logs[activeConsole] ?? [] : []}
               onReorder={setTabOrder}
               onRunCommand={runCommandIn}
+              wrap={config?.console_wrap ?? true}
+              prettyJson={config?.console_json ?? true}
+              onShowProjects={projectsHidden ? () => setProjectsHidden(false) : undefined}
               onClear={() => {
                 if (!activeConsole) return;
                 api.clearLogs(activeConsole);
@@ -3884,7 +4058,14 @@ export default function App() {
 // Vue Réglages
 // ---------------------------------------------------------------------------
 
-type SettingsTab = "general" | "projects" | "startup" | "actions" | "sequences" | "database";
+type SettingsTab =
+  | "general"
+  | "projects"
+  | "startup"
+  | "actions"
+  | "sequences"
+  | "database"
+  | "shortcuts";
 
 const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   { id: "general", label: "Général" },
@@ -3893,6 +4074,7 @@ const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   { id: "actions", label: "Actions" },
   { id: "sequences", label: "Séquences" },
   { id: "database", label: "Base de données" },
+  { id: "shortcuts", label: "⌨ Raccourcis" },
 ];
 
 function SettingsView({
@@ -4045,6 +4227,26 @@ function SettingsView({
           ))}
         </div>
 
+        {tab === "shortcuts" && (
+          <>
+            <h2>Raccourcis clavier</h2>
+            <p className="muted">
+              Attribuez une touche ou une combinaison à n'importe quelle fonctionnalité : actions
+              globales, séquences, et chaque action de chaque projet (vos « macros »).
+            </p>
+            <KeybindingsSettings
+              bindables={buildBindables(
+                projects,
+                settingsActions,
+                draft.sequences,
+                (pid) => !!draft.db_connections?.[pid],
+              )}
+              value={draft.keybindings ?? {}}
+              onChange={(next) => patch({ keybindings: next })}
+            />
+          </>
+        )}
+
         {tab === "projects" && (
           <>
             <h2>Projets</h2>
@@ -4116,6 +4318,24 @@ function SettingsView({
                 onChange={(e) => setNotify(e.target.checked)}
               />
               <span>Notifier les badges et succès débloqués (page 🏆)</span>
+            </label>
+
+            <h2>Console</h2>
+            <label className="autostart-row">
+              <input
+                type="checkbox"
+                checked={draft.console_wrap ?? true}
+                onChange={(e) => patch({ console_wrap: e.target.checked })}
+              />
+              <span>Retour à la ligne : les lignes longues ne dépassent pas de la console</span>
+            </label>
+            <label className="autostart-row">
+              <input
+                type="checkbox"
+                checked={draft.console_json ?? true}
+                onChange={(e) => patch({ console_json: e.target.checked })}
+              />
+              <span>Afficher les lignes JSON colorées et indentées</span>
             </label>
 
             <h2>Souris : défilement horizontal</h2>

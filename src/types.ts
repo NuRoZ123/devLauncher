@@ -591,6 +591,12 @@ export interface Config {
    * apparaît à un seul endroit (racine OU membres d'un dossier).
    */
   project_layout?: string[];
+  /** Raccourcis clavier personnalisés : id d'action (voir keybindings.ts) → combinaison. */
+  keybindings?: Record<string, string>;
+  /** Console : retour à la ligne des lignes longues (absent = activé). */
+  console_wrap?: boolean;
+  /** Console : lignes JSON affichées colorées et indentées (absent = activé). */
+  console_json?: boolean;
 }
 
 export interface PkgMeta {

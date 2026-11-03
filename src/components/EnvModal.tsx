@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 export interface EnvModalState {
   projectId: string;
@@ -68,9 +68,94 @@ function toggleComment(
   };
 }
 
+/** Partie de valeur : `${VAR}` / `$VAR` mis en évidence, le reste avec la classe `cls`. */
+function valueParts(text: string, cls: string, interp: boolean): ReactNode[] {
+  if (!interp) return [<span className={cls}>{text}</span>];
+  const out: ReactNode[] = [];
+  const re = /\$\{[^}]*\}?|\$[A-Za-z_][A-Za-z0-9_]*/g;
+  let last = 0;
+  for (let m; (m = re.exec(text)); ) {
+    if (m.index > last) out.push(<span className={cls}>{text.slice(last, m.index)}</span>);
+    out.push(<span className="env-tk-var">{m[0]}</span>);
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) out.push(<span className={cls}>{text.slice(last)}</span>);
+  return out;
+}
+
+/** Valeur non entre guillemets : nombre, booléen/null ou texte brut. */
+function bareClass(v: string): string {
+  if (/^-?\d+(\.\d+)?$/.test(v)) return "env-tk-num";
+  if (/^(true|false|null|yes|no|on|off)$/i.test(v)) return "env-tk-lit";
+  return "env-tk-val";
+}
+
+/** Colore une ligne de .env : `[export] CLE = valeur  # commentaire`. */
+function highlightLine(line: string): ReactNode[] {
+  if (/^\s*#/.test(line)) return [<span className="env-tk-comment">{line}</span>];
+  const m = /^(\s*)(export\s+)?([^=\s#]+)(\s*=\s*)(.*)$/.exec(line);
+  if (!m) return line.trim() ? [<span className="env-tk-bad">{line}</span>] : [line];
+  const [, indent, exp, key, eq, rest] = m;
+  const out: ReactNode[] = [indent];
+  if (exp) out.push(<span className="env-tk-kw">{exp}</span>);
+  out.push(<span className="env-tk-key">{key}</span>, <span className="env-tk-eq">{eq}</span>);
+
+  let value = rest;
+  let tail = "";
+  const q = rest[0];
+  if (q === '"' || q === "'" || q === "`") {
+    // Chaîne entre guillemets (non fermée : jusqu'au bout de la ligne).
+    const end = rest.indexOf(q, 1);
+    value = end === -1 ? rest : rest.slice(0, end + 1);
+    tail = rest.slice(value.length);
+    out.push(...valueParts(value, "env-tk-str", q !== "'"));
+  } else {
+    // Valeur brute : un « # » précédé d'un espace ouvre un commentaire.
+    const hash = rest.search(/\s#/);
+    if (hash !== -1) {
+      value = rest.slice(0, hash);
+      tail = rest.slice(hash);
+    }
+    const trimmed = value.trimEnd();
+    out.push(...valueParts(trimmed, bareClass(trimmed), true), value.slice(trimmed.length));
+  }
+  if (tail) {
+    const c = tail.indexOf("#");
+    if (c === -1) out.push(tail);
+    else out.push(tail.slice(0, c), <span className="env-tk-comment">{tail.slice(c)}</span>);
+  }
+  return out;
+}
+
 export function EnvModal({ state, onSave, onCancel }: Props) {
   const [content, setContent] = useState("");
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const hlRef = useRef<HTMLPreElement>(null);
+  // Couche colorée affichée sous le textarea (dont le texte est transparent).
+  const highlighted = useMemo(
+    () =>
+      // Fins de ligne Windows : le textarea affiche CRLF comme un seul retour, et
+      // un « \r » resté en fin de ligne ferait passer chaque ligne pour invalide.
+      content.split(/\r?\n/).map((line, i) => (
+        <Fragment key={i}>
+          {i > 0 && "\n"}
+          {highlightLine(line).map((part, j) => (
+            <Fragment key={j}>{part}</Fragment>
+          ))}
+        </Fragment>
+      )),
+    [content],
+  );
+  const syncScroll = () => {
+    const ta = taRef.current;
+    const hl = hlRef.current;
+    if (!ta || !hl) return;
+    hl.scrollTop = ta.scrollTop;
+    hl.scrollLeft = ta.scrollLeft;
+  };
+  // Une saisie peut faire défiler le textarea sans événement scroll exploitable
+  // avant le rendu de la nouvelle couche : on réaligne après chaque changement.
+  useLayoutEffect(syncScroll, [content]);
   // Sélection à réappliquer après un rendu déclenché par Ctrl+/ (voir plus bas).
   const pendingSel = useRef<{ start: number; end: number } | null>(null);
 
@@ -137,18 +222,26 @@ export function EnvModal({ state, onSave, onCancel }: Props) {
               <span className="spinner" /> Chargement du fichier…
             </div>
           ) : (
-            <textarea
-              ref={taRef}
-              className="env-editor"
-              spellCheck={false}
-              autoComplete="off"
-              autoCapitalize="off"
-              autoCorrect="off"
-              value={content}
-              disabled={state.saving}
-              onChange={(e) => setContent(e.target.value)}
-              onKeyDown={onEditorKeyDown}
-            />
+            <div className={"env-editor-stack" + (state.saving ? " is-disabled" : "")}>
+              <pre ref={hlRef} className="env-editor env-editor-hl" aria-hidden>
+                {highlighted}
+                {/* Ligne finale vide : garde la même hauteur de défilement que le textarea. */}
+                {"\n"}
+              </pre>
+              <textarea
+                ref={taRef}
+                className="env-editor env-editor-input"
+                spellCheck={false}
+                autoComplete="off"
+                autoCapitalize="off"
+                autoCorrect="off"
+                value={content}
+                disabled={state.saving}
+                onChange={(e) => setContent(e.target.value)}
+                onKeyDown={onEditorKeyDown}
+                onScroll={syncScroll}
+              />
+            </div>
           )}
         </div>
 

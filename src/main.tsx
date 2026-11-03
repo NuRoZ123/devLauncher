@@ -4,8 +4,10 @@ import App from "./App";
 import "./styles.css";
 import { installWheelHandling } from "./wheel";
 import { initStats } from "./stats";
+import { installModalKeys } from "./modalKeys";
 
 installWheelHandling();
+installModalKeys();
 void initStats();
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(

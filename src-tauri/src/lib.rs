@@ -271,6 +271,16 @@ struct Config {
     /// des fichiers. Opaque côté Rust, interprété par l'interface.
     #[serde(default)]
     changelists: HashMap<String, serde_json::Value>,
+    /// Raccourcis clavier personnalisés (« macros ») : id d'action → combinaison
+    /// ("Ctrl+Maj+S"). Interprétés par l'interface.
+    #[serde(default)]
+    keybindings: HashMap<String, String>,
+    /// Console : retour à la ligne des lignes longues (absent = activé).
+    #[serde(default)]
+    console_wrap: Option<bool>,
+    /// Console : lignes JSON rendues colorées et indentées (absent = activé).
+    #[serde(default)]
+    console_json: Option<bool>,
 }
 
 #[derive(Serialize)]

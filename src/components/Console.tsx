@@ -1,5 +1,6 @@
-import { memo, useEffect, useRef, useState } from "react";
-import { parseAnsi } from "../ansi";
+import { Fragment, memo, useEffect, useRef, useState } from "react";
+import { parseAnsi, type AnsiSeg } from "../ansi";
+import { findJson, renderJson } from "../jsonLog";
 import type { LogLine } from "../types";
 import {
   DndContext,
@@ -35,34 +36,61 @@ interface Props {
   onClose: (id: string) => void;
   onReorder: (orderedIds: string[]) => void;
   onRunCommand: (target: string, command: string) => void;
+  /** Retour à la ligne des lignes longues (sinon défilement horizontal). */
+  wrap: boolean;
+  /** Lignes JSON affichées colorées et indentées. */
+  prettyJson: boolean;
+  /** Fourni quand la liste des projets est masquée : bouton pour la rouvrir. */
+  onShowProjects?: () => void;
 }
 
 function fmtTime(ts: number): string {
   return new Date(ts).toLocaleTimeString("fr-FR", { hour12: false });
 }
 
-// Mémoïsée : une ligne déjà affichée n'est ni re-parsée (ANSI) ni re-rendue
-// lors des flushs suivants — seul l'ajout de nouvelles lignes coûte.
-const LogRow = memo(function LogRow({ l }: { l: LogLine }) {
+function AnsiText({ segs }: { segs: AnsiSeg[] }) {
   return (
-    <div className={"log-line log-" + l.stream}>
+    <>
+      {segs.map((seg, k) => (
+        <span
+          key={k}
+          style={{
+            color: seg.fg,
+            background: seg.bg,
+            fontWeight: seg.bold ? 700 : undefined,
+            opacity: seg.dim ? 0.7 : undefined,
+            fontStyle: seg.italic ? "italic" : undefined,
+            textDecoration: seg.underline ? "underline" : undefined,
+          }}
+        >
+          {seg.text}
+        </span>
+      ))}
+    </>
+  );
+}
+
+// Mémoïsée : une ligne déjà affichée n'est ni re-parsée (ANSI, JSON) ni re-rendue
+// lors des flushs suivants — seul l'ajout de nouvelles lignes coûte.
+const LogRow = memo(function LogRow({ l, prettyJson }: { l: LogLine; prettyJson: boolean }) {
+  const segs = parseAnsi(l.line);
+  // JSON cherché sur le texte sans couleurs ANSI : le rendu stylé les remplace.
+  const json = prettyJson ? findJson(segs.map((s) => s.text).join("")) : null;
+  return (
+    <div className={"log-line log-" + l.stream + (json ? " log-json" : "")}>
       <span className="log-time">{fmtTime(l.ts)}</span>
       <span className="log-text">
-        {parseAnsi(l.line).map((seg, k) => (
-          <span
-            key={k}
-            style={{
-              color: seg.fg,
-              background: seg.bg,
-              fontWeight: seg.bold ? 700 : undefined,
-              opacity: seg.dim ? 0.7 : undefined,
-              fontStyle: seg.italic ? "italic" : undefined,
-              textDecoration: seg.underline ? "underline" : undefined,
-            }}
-          >
-            {seg.text}
-          </span>
-        ))}
+        {json ? (
+          <>
+            {json.prefix}
+            {renderJson(json.value).map((n, k) => (
+              <Fragment key={k}>{n}</Fragment>
+            ))}
+            {json.suffix}
+          </>
+        ) : (
+          <AnsiText segs={segs} />
+        )}
       </span>
     </div>
   );
@@ -132,6 +160,9 @@ export function Console({
   onClose,
   onReorder,
   onRunCommand,
+  wrap,
+  prettyJson,
+  onShowProjects,
 }: Props) {
   const bodyRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
@@ -220,6 +251,15 @@ export function Console({
   return (
     <div className="console">
       <div className="console-tabs">
+        {onShowProjects && (
+          <button
+            className="console-show-projects"
+            onClick={onShowProjects}
+            title="Afficher la liste des projets"
+          >
+            » Projets
+          </button>
+        )}
         {tabs.length === 0 && <div className="console-empty-tab">Console</div>}
         <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
           <SortableContext items={tabs.map((t) => t.id)} strategy={horizontalListSortingStrategy}>
@@ -236,12 +276,12 @@ export function Console({
       </div>
 
       <div className="console-wrap">
-        <div className="console-body" ref={bodyRef} onScroll={onScroll}>
+        <div className={"console-body" + (wrap ? " console-wrap-lines" : "")} ref={bodyRef} onScroll={onScroll}>
           {!active && <div className="console-placeholder">Aucune sortie pour le moment.</div>}
           {active && hidden > 0 && (
             <div className="log-more">… {hidden} lignes précédentes non affichées</div>
           )}
-          {active && visible.map((l, i) => <LogRow key={l.key ?? i} l={l} />)}
+          {active && visible.map((l, i) => <LogRow key={l.key ?? i} l={l} prettyJson={prettyJson} />)}
         </div>
         {active && !atBottom && (
           <button className="follow-btn" onClick={jumpToBottom} title="Revenir en bas et suivre les logs">

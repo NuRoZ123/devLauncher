@@ -9,7 +9,14 @@ import { langForFile } from "./highlight";
  * que la fenêtre soit visible ou non.
  */
 
-export type CounterKey = "services" | "conflicts" | "commits" | "pushes" | "commitsViewed" | "sqlQueries";
+export type CounterKey =
+  | "services"
+  | "conflicts"
+  | "commits"
+  | "pushes"
+  | "commitsViewed"
+  | "sqlQueries"
+  | "macros";
 
 export interface Stats {
   v: 1;
@@ -62,6 +69,8 @@ export interface UniqueDef {
 
 interface StatsCtx {
   projectCount: number;
+  /** Raccourcis clavier attribués (config.keybindings). */
+  bindingCount: number;
 }
 
 const H = 3_600_000;
@@ -83,6 +92,10 @@ export const BADGES: BadgeDef[] = [
     thresholds: [10, 100, 500, 1000, 5000], value: (s) => Math.floor(s.totalMs / H) },
   { id: "collector", icon: "📚", name: "Collectionneur", desc: "Projets configurés", unit: "projets",
     thresholds: [3, 10, 25, 50, 100], value: (_s, c) => c.projectCount },
+  { id: "keymaster", icon: "🎹", name: "Maître des touches", desc: "Raccourcis clavier attribués", unit: "raccourcis",
+    thresholds: [1, 5, 15, 30, 60], value: (_s, c) => c.bindingCount },
+  { id: "macroist", icon: "⌨️", name: "Macroïste", desc: "Macros déclenchées au clavier", unit: "macros",
+    thresholds: [10, 100, 500, 2000, 10000], value: (s) => s.counters.macros },
 ];
 
 export const UNIQUES: UniqueDef[] = [
@@ -98,6 +111,11 @@ export const UNIQUES: UniqueDef[] = [
   { id: "polyglot", icon: "🌐", name: "Polyglotte", desc: "Résoudre des conflits dans 5 langages différents" },
   { id: "faithful", icon: "💍", name: "Fidèle", desc: "Un an après la première utilisation" },
   { id: "noNet", icon: "🎪", name: "Sans filet", desc: "Pousser directement sur la branche par défaut du dépôt" },
+  { id: "firstKey", icon: "🔑", name: "Première touche", desc: "Lancer sa première macro au clavier" },
+  { id: "contortionist", icon: "🤸", name: "Contorsionniste", desc: "Déclencher une macro à 4 touches ou plus" },
+  { id: "pianist", icon: "🎶", name: "Pianiste", desc: "10 macros en moins d'une minute" },
+  { id: "noMouse", icon: "🐭", name: "Souris au chômage", desc: "100 macros dans la même journée" },
+  { id: "fullMap", icon: "🗺️", name: "Clavier cartographié", desc: "Attribuer un raccourci à chaque action globale" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -113,7 +131,7 @@ function empty(): Stats {
     days: {},
     longestSessionMs: 0,
     serviceMs: {},
-    counters: { services: 0, conflicts: 0, commits: 0, pushes: 0, commitsViewed: 0, sqlQueries: 0 },
+    counters: { services: 0, conflicts: 0, commits: 0, pushes: 0, commitsViewed: 0, sqlQueries: 0, macros: 0 },
     pullStreak: 0,
     badges: {},
     uniques: {},
@@ -131,7 +149,9 @@ let queue: ((s: Stats) => void)[] = [];
 let sessionMs = 0;
 let lastTick = Date.now();
 let running: string[] = [];
-const ctx: StatsCtx = { projectCount: 0 };
+const ctx: StatsCtx = { projectCount: 0, bindingCount: 0 };
+/** Horodatages des dernières macros (succès Pianiste), session uniquement. */
+let recentMacros: number[] = [];
 const listeners = new Set<() => void>();
 const unlockListeners = new Set<(u: Unlock) => void>();
 
@@ -312,6 +332,27 @@ export const track = {
   setRunning(ids: string[]) {
     running = ids;
     if (ids.length >= 5) mutate((s) => unlockUnique(s, "conductor"));
+  },
+  /** Macro déclenchée au clavier ; `keys` = nombre de touches de la combinaison. */
+  macro(keys: number) {
+    const now = Date.now();
+    recentMacros = [...recentMacros.filter((t) => now - t < 60_000), now];
+    mutate((s) => {
+      addCount(s, "macros");
+      unlockUnique(s, "firstKey");
+      if (keys >= 4) unlockUnique(s, "contortionist");
+      if (recentMacros.length >= 10) unlockUnique(s, "pianist");
+      if ((s.dayCounts[dayKey(new Date())]?.macros ?? 0) >= 100) unlockUnique(s, "noMouse");
+    });
+  },
+  /** Raccourcis attribués : nombre total, et toutes les actions globales couvertes ? */
+  setBindings(n: number, allGlobal: boolean) {
+    if (ctx.bindingCount === n && !allGlobal) return;
+    ctx.bindingCount = n;
+    if (loaded || allGlobal)
+      mutate((s) => {
+        if (allGlobal) unlockUnique(s, "fullMap");
+      });
   },
   setProjectCount(n: number) {
     if (ctx.projectCount === n) return;

@@ -519,6 +519,49 @@ input[type="checkbox"]:disabled {
   color: var(--text);
   background: var(--panel);
 }
+/* En-tête de la liste : « Nouveau dossier » + bouton de repli du panneau. */
+.projects-head {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.projects-head .add-folder-line {
+  flex: 1;
+  margin-bottom: 0;
+}
+.projects-collapse {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 0 10px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color 0.12s, color 0.12s, background 0.12s;
+}
+.projects-collapse:hover,
+.console-show-projects:hover {
+  border-color: var(--accent);
+  color: var(--text);
+  background: var(--panel);
+}
+.console-show-projects {
+  flex: 0 0 auto;
+  align-self: center;
+  margin: 0 6px 6px 0;
+  padding: 4px 9px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
 .add-folder-plus {
   font-size: 15px;
   font-weight: 700;
@@ -1410,6 +1453,42 @@ input[type="checkbox"]:disabled {
 .log-sys .log-text {
   color: var(--accent-2);
   font-weight: 600;
+}
+/* Réglage « retour à la ligne » : la ligne prend la largeur de la console et
+   se replie (même au milieu d'un long mot / d'une URL), l'heure reste à gauche. */
+.console-wrap-lines .log-line {
+  white-space: pre-wrap;
+  width: auto;
+  min-width: 0;
+}
+.console-wrap-lines .log-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+/* Lignes JSON : rendu indenté, séparé des lignes voisines. */
+.log-json {
+  margin: 2px 0;
+}
+.log-json .log-text {
+  color: #cbd5e1;
+  font-weight: 400;
+}
+.jl-key {
+  color: #9cdcfe;
+}
+.jl-str {
+  color: #ce9178;
+}
+.jl-num {
+  color: #b5cea8;
+}
+.jl-bool,
+.jl-null {
+  color: #569cd6;
+}
+.jl-punc {
+  color: #7f848e;
 }
 
 /* ---------------- Settings ---------------- */
@@ -3501,6 +3580,70 @@ button.db-table {
 }
 .env-editor:disabled {
   opacity: 0.6;
+}
+/* Coloration : la couche <pre> dessous porte les couleurs, le textarea au-dessus
+   (texte transparent) garde la saisie, le curseur et la sélection. */
+.env-editor-stack {
+  position: relative;
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+.env-editor-stack.is-disabled {
+  opacity: 0.6;
+}
+.env-editor-hl {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.env-editor-input {
+  position: relative;
+  background: transparent;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  caret-color: var(--text);
+}
+.env-editor-input:disabled {
+  opacity: 1;
+}
+.env-editor-input::selection {
+  background: rgba(79, 140, 255, 0.35);
+}
+.env-editor-input::placeholder {
+  -webkit-text-fill-color: var(--muted);
+}
+.env-tk-comment {
+  color: #6a9955;
+  font-style: italic;
+}
+.env-tk-key {
+  color: #9cdcfe;
+}
+.env-tk-eq {
+  color: var(--muted);
+}
+.env-tk-kw,
+.env-tk-lit {
+  color: #569cd6;
+}
+.env-tk-str {
+  color: #ce9178;
+}
+.env-tk-num {
+  color: #b5cea8;
+}
+.env-tk-val {
+  color: #dcdcaa;
+}
+.env-tk-var {
+  color: #c586c0;
+}
+.env-tk-bad {
+  color: var(--red);
+  text-decoration: underline wavy rgba(248, 81, 73, 0.6);
 }
 .env-hint {
   font-size: 12px;
@@ -5839,20 +5982,245 @@ button.db-table {
   opacity: 0.85;
   filter: none;
 }
-/* Point « nouveau badge » sur le trophée. */
+/* Point « nouveau badge » sur le trophée, jusqu'à l'ouverture de la page. */
 .brand-trophy-dot {
   position: absolute;
-  top: 1px;
-  right: 0;
-  width: 6px;
-  height: 6px;
+  top: -1px;
+  right: -3px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
   background: #e3b341;
   box-shadow: 0 0 0 2px var(--bg, #0d1117);
+  animation: trophy-dot 1.8s ease-in-out infinite;
+}
+@keyframes trophy-dot {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px var(--bg, #0d1117), 0 0 0 2px rgba(227, 179, 65, 0.5);
+  }
+  50% {
+    box-shadow: 0 0 0 2px var(--bg, #0d1117), 0 0 0 6px rgba(227, 179, 65, 0);
+  }
+}
+
+/* Nouveautés depuis la dernière visite de la page 🏆. */
+.stats-fresh {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 18px;
+  padding: 10px 14px;
+  border: 1px solid rgba(227, 179, 65, 0.5);
+  border-radius: var(--radius-sm);
+  background: rgba(227, 179, 65, 0.08);
+}
+.stats-fresh-title {
+  font-weight: 600;
+}
+.stats-fresh-item {
+  padding: 3px 10px;
+  border: 1px solid rgba(227, 179, 65, 0.5);
+  border-radius: 20px;
+  background: var(--panel-2);
+  color: inherit;
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.stats-fresh-item:hover {
+  border-color: #e3b341;
+}
+.badge-card.is-new,
+.unique-card.is-new {
+  position: relative;
+  border-color: #e3b341 !important;
+  box-shadow: 0 0 0 1px rgba(227, 179, 65, 0.6), 0 0 14px rgba(227, 179, 65, 0.25);
+}
+.stats-new-pill {
+  position: absolute;
+  top: -8px;
+  right: 10px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: #e3b341;
+  color: #1a1400;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
 }
 
 /* Menu de colonne (table BDD) : conditions de filtre pré-remplies. */
 .dbdata-colmenu-op {
   font-family: var(--mono, ui-monospace, Consolas, monospace);
   font-size: 12px;
+}
+
+/* ===== Raccourcis clavier (Réglages → Raccourcis) ===== */
+.kb-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.kb-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.kb-search {
+  flex: 1;
+  min-width: 220px;
+}
+.kb-group {
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  overflow: hidden;
+}
+.kb-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--panel-2);
+  border: none;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+.kb-group-head:hover {
+  background: var(--panel-3, var(--panel-2));
+}
+.kb-caret {
+  width: 12px;
+  opacity: 0.6;
+}
+.kb-group-name {
+  flex: 1;
+}
+.kb-rows {
+  display: flex;
+  flex-direction: column;
+}
+.kb-row {
+  display: grid;
+  grid-template-columns: 1fr 220px 30px;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  border-top: 1px solid var(--border-soft);
+}
+.kb-row:hover,
+.kb-row.on {
+  background: rgba(79, 140, 255, 0.06);
+}
+.kb-row.kb-reserved {
+  grid-template-columns: 1fr 220px 30px;
+  opacity: 0.75;
+}
+.kb-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kb-bind {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg, transparent);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.kb-bind:hover {
+  border-color: var(--accent, #4f8cff);
+}
+.kb-bind.empty {
+  color: var(--muted, #888);
+}
+.kb-bind.static {
+  cursor: default;
+  border-style: dashed;
+}
+.kb-bind.capturing {
+  border-color: var(--accent, #4f8cff);
+  box-shadow: 0 0 0 2px rgba(79, 140, 255, 0.35);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+.kb-wait {
+  font-size: 12px;
+  color: var(--accent, #4f8cff);
+}
+.kb-keys {
+  display: inline-flex;
+  gap: 3px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.kb-key {
+  display: inline-block;
+  min-width: 20px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--panel-2);
+  font-family: var(--mono, ui-monospace, Consolas, monospace);
+  font-size: 11.5px;
+  text-align: center;
+}
+.kb-clear {
+  padding: 0 6px;
+}
+.kb-notice {
+  grid-column: 1 / -1;
+  font-size: 12px;
+  color: var(--muted, #888);
+  padding-bottom: 4px;
+}
+.kb-notice.error {
+  color: var(--danger, #e5534b);
+}
+.kb-help {
+  font-size: 12px;
+}
+
+/* Bulle éphémère : macro déclenchée au clavier. */
+.kb-flash {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%);
+  z-index: 200;
+  padding: 7px 14px;
+  border-radius: 20px;
+  background: var(--panel-2);
+  border: 1px solid var(--accent, #4f8cff);
+  box-shadow: var(--shadow);
+  font-size: 13px;
+  pointer-events: none;
+  animation: kb-flash 1.4s ease forwards;
+}
+@keyframes kb-flash {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, 8px);
+  }
+  12%,
+  75% {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+  100% {
+    opacity: 0;
+  }
 }

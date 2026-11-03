@@ -35,6 +35,10 @@ export function StatsView({ projects, onClose }: { projects: Project[]; onClose:
   const s = useStats();
   useNow();
   const [help, setHelp] = useState(false);
+  // Dernière visite avant cette ouverture : tout ce qui a été obtenu après est
+  // marqué « Nouveau » tant que la page reste ouverte.
+  const [prevSeen] = useState(() => s.seenAt);
+  const isNew = (t?: number) => !!t && t > prevSeen;
   // Page vue : plus de point « nouveau » sur le trophée (et à la sortie, pour
   // ce qui a été débloqué pendant qu'elle était ouverte).
   useEffect(() => {
@@ -66,6 +70,19 @@ export function StatsView({ projects, onClose }: { projects: Project[]; onClose:
   const maxService = topServices[0]?.[1] ?? 1;
   const tierCount = BADGES.reduce((n, b) => n + (s.badges[b.id]?.length ?? 0), 0);
   const uniqueCount = UNIQUES.filter((u) => s.uniques[u.id]).length;
+  const fresh = [
+    ...BADGES.filter((b) => (s.badges[b.id] ?? []).some(isNew)).map((b) => {
+      const tier = s.badges[b.id].length;
+      return { id: b.id, icon: b.icon, label: `${b.name} · ${TIERS[tier - 1]}` };
+    }),
+    ...UNIQUES.filter((u) => isNew(s.uniques[u.id])).map((u) => ({
+      id: u.id,
+      icon: u.icon,
+      label: u.name,
+    })),
+  ];
+  const scrollTo = (id: string) =>
+    document.getElementById(`stat-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
 
   return (
     <div className="stats-page">
@@ -76,6 +93,19 @@ export function StatsView({ projects, onClose }: { projects: Project[]; onClose:
         <h2>🏆 Statistiques</h2>
         <span className="stats-since">depuis le {fmtDate(s.firstSeen)}</span>
       </div>
+
+      {fresh.length > 0 && (
+        <div className="stats-fresh">
+          <span className="stats-fresh-title">
+            ✨ {fresh.length > 1 ? `${fresh.length} nouveautés` : "Nouveauté"} depuis ta dernière visite :
+          </span>
+          {fresh.map((f) => (
+            <button key={f.id} className="stats-fresh-item" onClick={() => scrollTo(f.id)}>
+              {f.icon} {f.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       <div className="stats-tiles">
         <Tile label="Session en cours" value={fmtDuration(sessionNow(), true)} />
@@ -179,8 +209,14 @@ export function StatsView({ projects, onClose }: { projects: Project[]; onClose:
             const next = b.thresholds[tier];
             const prev = tier > 0 ? b.thresholds[tier - 1] : 0;
             const pct = next ? Math.min(100, ((v - prev) / (next - prev)) * 100) : 100;
+            const neu = got.some(isNew);
             return (
-              <div key={b.id} className={"badge-card" + (tier ? ` tier-${tier}` : " tier-0")}>
+              <div
+                key={b.id}
+                id={`stat-${b.id}`}
+                className={"badge-card" + (tier ? ` tier-${tier}` : " tier-0") + (neu ? " is-new" : "")}
+              >
+                {neu && <span className="stats-new-pill">Nouveau</span>}
                 <div className="badge-medal">{b.icon}</div>
                 <div className="badge-body">
                   <div className="badge-name">
@@ -216,7 +252,12 @@ export function StatsView({ projects, onClose }: { projects: Project[]; onClose:
           {UNIQUES.map((u) => {
             const at = s.uniques[u.id];
             return (
-              <div key={u.id} className={"unique-card" + (at ? " done" : "")}>
+              <div
+                key={u.id}
+                id={`stat-${u.id}`}
+                className={"unique-card" + (at ? " done" : "") + (isNew(at) ? " is-new" : "")}
+              >
+                {isNew(at) && <span className="stats-new-pill">Nouveau</span>}
                 <span className="unique-icon">{u.icon}</span>
                 <div>
                   <div className="unique-name">{u.name}</div>
@@ -251,6 +292,7 @@ const DAY_LABELS: [CounterKey, string, string][] = [
   ["conflicts", "conflit résolu", "conflits résolus"],
   ["sqlQueries", "requête SQL", "requêtes SQL"],
   ["commitsViewed", "commit consulté", "commits consultés"],
+  ["macros", "macro clavier", "macros clavier"],
 ];
 
 function dayTitle(key: string, ms: number, counts?: Partial<Record<CounterKey, number>>) {
