@@ -101,6 +101,12 @@ export interface FileVersions {
   work: string | null;
   binary: boolean;
   crlf: boolean;
+  /** Image : chaque version en data-URL pour l'aperçu avant / après. */
+  head_image?: string | null;
+  work_image?: string | null;
+  /** Poids en octets de chaque version (null = absente). */
+  head_size?: number | null;
+  work_size?: number | null;
 }
 
 /** Changelist (façon JetBrains) d'un projet. */

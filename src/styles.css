@@ -4598,6 +4598,49 @@ button.db-table {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Comparaison d'images : avant / après côte à côte, sur damier (transparence). */
+.dv-img-compare {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.dv-img-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.dv-img-meta {
+  margin-left: 8px;
+  font-size: 11.5px;
+}
+.dv-img-stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background-color: #1b2129;
+  background-image:
+    linear-gradient(45deg, #252c36 25%, transparent 25%),
+    linear-gradient(-45deg, #252c36 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #252c36 75%),
+    linear-gradient(-45deg, transparent 75%, #252c36 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+}
+.dv-img-stage img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  image-rendering: auto;
+}
 .mv-head-res b {
   color: var(--accent-2);
 }

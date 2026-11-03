@@ -80,6 +80,55 @@ function Highlights({
   );
 }
 
+/** Poids lisible (« 12,4 Ko »). */
+function fmtSize(n: number) {
+  if (n < 1024) return `${n} o`;
+  const kb = n / 1024;
+  const fmt = (v: number) => v.toLocaleString("fr-FR", { maximumFractionDigits: 1 });
+  return kb < 1024 ? `${fmt(kb)} Ko` : `${fmt(kb / 1024)} Mo`;
+}
+
+/** Un côté de la comparaison d'images : aperçu sur damier, dimensions et poids. */
+function ImagePane({
+  label,
+  sub,
+  src,
+  size,
+  absent,
+}: {
+  label: string;
+  sub?: string;
+  src: string | null | undefined;
+  size: number | null | undefined;
+  absent: string;
+}) {
+  const [dims, setDims] = useState<string | null>(null);
+  return (
+    <div className="dv-img-pane">
+      <div className="mv-head">
+        <b>{label}</b> {sub && <span className="muted">{sub}</span>}
+        {src && (
+          <span className="muted dv-img-meta">
+            {dims && `${dims} · `}
+            {size != null && fmtSize(size)}
+          </span>
+        )}
+      </div>
+      <div className="dv-img-stage">
+        {src ? (
+          <img
+            src={src}
+            alt={label}
+            onLoad={(e) => setDims(`${e.currentTarget.naturalWidth} × ${e.currentTarget.naturalHeight} px`)}
+          />
+        ) : (
+          <span className="muted">{absent}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 interface Props {
   file: string;
   /** Ancien chemin (renommage), affiché dans l'en-tête. */
@@ -369,7 +418,7 @@ export function DiffView({
             {file}
           </span>
           <span className="muted mv-stats">
-            {changes.length} changement{changes.length > 1 ? "s" : ""}
+            {!versions.binary && `${changes.length} changement${changes.length > 1 ? "s" : ""}`}
             {dirty && " · modifié (non enregistré)"}
           </span>
         </div>
@@ -418,7 +467,23 @@ export function DiffView({
         </div>
       </div>
 
-      {versions.binary ? (
+      {versions.binary && (versions.head_image || versions.work_image) ? (
+        <div className="dv-img-compare">
+          <ImagePane
+            label={leftLabel ?? "HEAD"}
+            sub={leftLabel ? undefined : "version committée"}
+            src={versions.head_image}
+            size={versions.head_size}
+            absent="Nouveau fichier : pas de version précédente"
+          />
+          <ImagePane
+            label={rightLabel ?? "Version de travail"}
+            src={versions.work_image}
+            size={versions.work_size}
+            absent="Fichier supprimé"
+          />
+        </div>
+      ) : versions.binary ? (
         <div className="empty">Fichier binaire ou non UTF-8 : pas de comparaison ligne à ligne.</div>
       ) : (
         <>

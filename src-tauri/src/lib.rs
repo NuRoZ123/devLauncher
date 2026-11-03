@@ -1811,18 +1811,17 @@ async fn git_commit_file_versions(
         let top = top.to_string_lossy().into_owned();
         let hash = safe_rev(&hash)?.to_string();
         let before_path = orig.filter(|o| !o.is_empty()).unwrap_or_else(|| file.clone());
-        let mut binary = false;
-        let read = |spec: String, binary: &mut bool| match git_raw(&git, &top, &["show", &spec]) {
-            Ok((out, _, true)) => Some(as_text(out, binary)),
+        let read = |spec: String| match git_raw(&git, &top, &["show", &spec]) {
+            Ok((out, _, true)) => Some(out),
             _ => None,
         };
         let head = if parent.trim().is_empty() {
             None
         } else {
-            read(format!("{}:{}", safe_rev(&parent)?, before_path), &mut binary)
+            read(format!("{}:{}", safe_rev(&parent)?, before_path))
         };
-        let work = read(format!("{}:{}", hash, file), &mut binary);
-        Ok(FileVersions { head, work, binary, crlf: false })
+        let work = read(format!("{}:{}", hash, file));
+        Ok(FileVersions::build(&file, head, work, false))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -2613,6 +2612,68 @@ struct FileVersions {
     binary: bool,
     /// Fins de ligne CRLF dans le fichier de travail : à restituer à l'écriture.
     crlf: bool,
+    /// Image (png, jpg…) : versions en data-URL pour un aperçu avant / après.
+    head_image: Option<String>,
+    work_image: Option<String>,
+    /// Poids en octets de chaque version (None = absente).
+    head_size: Option<u64>,
+    work_size: Option<u64>,
+}
+
+impl FileVersions {
+    /// Assemble les deux versions brutes : texte décodé, ou aperçu si c'est une image.
+    fn build(file: &str, head: Option<Vec<u8>>, work: Option<Vec<u8>>, crlf: bool) -> Self {
+        let mut binary = false;
+        let head_size = head.as_ref().map(|b| b.len() as u64);
+        let work_size = work.as_ref().map(|b| b.len() as u64);
+        // Les images ne passent jamais par le décodage texte (un SVG reste comparé en texte).
+        let mime = image_mime(file);
+        let (head_image, work_image) = match mime {
+            Some(m) => {
+                binary = true;
+                (head.as_deref().map(|b| data_url(m, b)), work.as_deref().map(|b| data_url(m, b)))
+            }
+            None => (None, None),
+        };
+        let (head, work) = if mime.is_some() {
+            (head.map(|_| String::new()), work.map(|_| String::new()))
+        } else {
+            (head.map(|b| as_text(b, &mut binary)), work.map(|b| as_text(b, &mut binary)))
+        };
+        FileVersions { head, work, binary, crlf, head_image, work_image, head_size, work_size }
+    }
+}
+
+/// Type MIME d'une image matricielle affichable par la WebView, d'après l'extension.
+fn image_mime(file: &str) -> Option<&'static str> {
+    let ext = Path::new(file).extension()?.to_str()?.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
+        "avif" => "image/avif",
+        _ => return None,
+    })
+}
+
+/// Encode des octets en data-URL base64.
+fn data_url(mime: &str, bytes: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(mime.len() + 13 + bytes.len().div_ceil(3) * 4);
+    out.push_str("data:");
+    out.push_str(mime);
+    out.push_str(";base64,");
+    for c in bytes.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if c.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    out
 }
 
 /// Décode un contenu texte ; `binary` passe à vrai s'il ne l'est pas.
@@ -2640,9 +2701,8 @@ async fn git_file_versions(
         let top = git_toplevel(&git, &path)?;
         let top_s = top.to_string_lossy().into_owned();
         let head_path = orig.filter(|o| !o.is_empty()).unwrap_or_else(|| file.clone());
-        let mut binary = false;
-        let show = |spec: String, binary: &mut bool| match git_raw(&git, &top_s, &["show", &spec]) {
-            Ok((out, _, true)) => Some(as_text(out, binary)),
+        let show = |spec: String| match git_raw(&git, &top_s, &["show", &spec]) {
+            Ok((out, _, true)) => Some(out),
             _ => None,
         };
         // Fichier partiellement indexé : « staged » compare HEAD ↔ index (ce que
@@ -2650,7 +2710,7 @@ async fn git_file_versions(
         // changements supplémentaires). Sinon : HEAD ↔ version de travail.
         let side = side.unwrap_or_default();
         if side == "staged" {
-            let head = show(format!("HEAD:{}", head_path), &mut binary);
+            let head = show(format!("HEAD:{}", head_path));
             let raw_index = git_raw(&git, &top_s, &["show", &format!(":{}", file)])
                 .ok()
                 .filter(|r| r.2)
@@ -2659,21 +2719,19 @@ async fn git_file_versions(
                 .as_ref()
                 .map(|b| b.windows(2).any(|w| w == b"\r\n"))
                 .unwrap_or(false);
-            let work = raw_index.map(|b| as_text(b, &mut binary));
-            return Ok(FileVersions { head, work, binary, crlf });
+            return Ok(FileVersions::build(&file, head, raw_index, crlf));
         }
         let head = if side == "unstaged" {
-            show(format!(":{}", file), &mut binary)
+            show(format!(":{}", file))
         } else {
-            show(format!("HEAD:{}", head_path), &mut binary)
+            show(format!("HEAD:{}", head_path))
         };
         let raw_work = std::fs::read(top.join(&file)).ok();
         let crlf = raw_work
             .as_ref()
             .map(|b| b.windows(2).any(|w| w == b"\r\n"))
             .unwrap_or(false);
-        let work = raw_work.map(|b| as_text(b, &mut binary));
-        Ok(FileVersions { head, work, binary, crlf })
+        Ok(FileVersions::build(&file, head, raw_work, crlf))
     })
     .await
     .map_err(|e| e.to_string())?
