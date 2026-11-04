@@ -27,6 +27,16 @@ interface Tab {
   running: boolean;
 }
 
+/** Console d'un projet (sous-onglet) : « Lancement » ou une console libre. */
+export interface SubTab {
+  key: string;
+  name: string;
+  /** « Lancement » : sortie du service, ni renommable ni fermable. */
+  launch?: boolean;
+  /** Service démarré (Lancement) ou tâche en cours (console libre). */
+  busy?: boolean;
+}
+
 interface Props {
   tabs: Tab[];
   active: string | null;
@@ -42,6 +52,94 @@ interface Props {
   prettyJson: boolean;
   /** Fourni quand la liste des projets est masquée : bouton pour la rouvrir. */
   onShowProjects?: () => void;
+  /** Consoles du projet actif et celle affichée. */
+  subs: SubTab[];
+  activeSub: string | null;
+  setActiveSub: (key: string) => void;
+  onAddSub: () => void;
+  onCloseSub: (key: string) => void;
+  onRenameSub: (key: string, name: string) => void;
+}
+
+/** Ligne des consoles du projet actif : sélection, renommage (double-clic), fermeture, ajout. */
+function SubTabs({
+  subs,
+  active,
+  onSelect,
+  onAdd,
+  onClose,
+  onRename,
+}: {
+  subs: SubTab[];
+  active: string | null;
+  onSelect: (key: string) => void;
+  onAdd: () => void;
+  onClose: (key: string) => void;
+  onRename: (key: string, name: string) => void;
+}) {
+  const [editing, setEditing] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const commit = () => {
+    if (editing && draft.trim()) onRename(editing, draft.trim());
+    setEditing(null);
+  };
+  return (
+    <div className="console-subtabs">
+      {subs.map((s) =>
+        editing === s.key ? (
+          <input
+            key={s.key}
+            className="console-subtab-input"
+            autoFocus
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onBlur={commit}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter") commit();
+              else if (e.key === "Escape") setEditing(null);
+            }}
+          />
+        ) : (
+          <div
+            key={s.key}
+            className={"console-subtab" + (s.key === active ? " active" : "")}
+            onClick={() => onSelect(s.key)}
+            onDoubleClick={() => {
+              if (s.launch) return;
+              setDraft(s.name);
+              setEditing(s.key);
+            }}
+            onMouseDown={(e) => {
+              if (e.button === 1 && !s.launch) {
+                e.preventDefault();
+                onClose(s.key);
+              }
+            }}
+            title={s.launch ? "Sortie du service" : "Double-clic pour renommer"}
+          >
+            {s.busy && (s.launch ? <span className="dot dot-run" /> : <span className="spinner spinner-xs" />)}
+            {s.name}
+            {!s.launch && (
+              <button
+                className="tab-close"
+                title="Fermer la console (son contenu est effacé)"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onClose(s.key);
+                }}
+              >
+                ×
+              </button>
+            )}
+          </div>
+        ),
+      )}
+      <button className="console-subtab-add" onClick={onAdd} title="Nouvelle console pour ce projet">
+        +
+      </button>
+    </div>
+  );
 }
 
 function fmtTime(ts: number): string {
@@ -163,6 +261,12 @@ export function Console({
   wrap,
   prettyJson,
   onShowProjects,
+  subs,
+  activeSub,
+  setActiveSub,
+  onAddSub,
+  onCloseSub,
+  onRenameSub,
 }: Props) {
   const bodyRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
@@ -170,26 +274,32 @@ export function Console({
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
 
   const [cmd, setCmd] = useState("");
-  const histRef = useRef<string[]>([]);
+  // Historique des commandes propre à chaque console.
+  const histMap = useRef(new Map<string, string[]>());
   const [histIdx, setHistIdx] = useState(-1);
+  const target = activeSub ?? active;
+  const histKey = target ?? "";
+  const launchActive = !!subs.find((s) => s.key === target)?.launch;
+  useEffect(() => setHistIdx(-1), [histKey]);
 
   function submitCmd() {
     const c = cmd.trim();
-    if (!active || !c) return;
+    if (!target || !c) return;
     // "clear"/"cls" sont interceptés côté client : ils vident la console
     // (même action que le bouton « Vider ») au lieu d'être exécutés.
     if (c.toLowerCase() === "clear" || c.toLowerCase() === "cls") {
       onClear();
     } else {
-      onRunCommand(active, c);
+      onRunCommand(target, c);
     }
-    histRef.current = [c, ...histRef.current.filter((x) => x !== c)].slice(0, 50);
+    const h = histMap.current.get(histKey) ?? [];
+    histMap.current.set(histKey, [c, ...h.filter((x) => x !== c)].slice(0, 50));
     setHistIdx(-1);
     setCmd("");
   }
 
   function onCmdKey(e: React.KeyboardEvent<HTMLInputElement>) {
-    const h = histRef.current;
+    const h = histMap.current.get(histKey) ?? [];
     if (e.key === "Enter") {
       e.preventDefault();
       submitCmd();
@@ -275,6 +385,17 @@ export function Console({
         </div>
       </div>
 
+      {active && (
+        <SubTabs
+          subs={subs}
+          active={target}
+          onSelect={setActiveSub}
+          onAdd={onAddSub}
+          onClose={onCloseSub}
+          onRename={onRenameSub}
+        />
+      )}
+
       <div className="console-wrap">
         <div className={"console-body" + (wrap ? " console-wrap-lines" : "")} ref={bodyRef} onScroll={onScroll}>
           {!active && <div className="console-placeholder">Aucune sortie pour le moment.</div>}
@@ -299,7 +420,11 @@ export function Console({
           disabled={!active}
           value={cmd}
           placeholder={
-            active ? "Commande à exécuter dans le projet, puis Entrée…" : "Ouvre une console"
+            !active
+              ? "Ouvre une console"
+              : launchActive
+                ? "Commande à exécuter dans le projet (sortie dans « Commandes »), puis Entrée…"
+                : "Commande à exécuter dans le projet, puis Entrée…"
           }
           onChange={(e) => setCmd(e.target.value)}
           onKeyDown={onCmdKey}

@@ -113,7 +113,8 @@ import type {
 } from "./types";
 
 type StepToken = { cancelled: boolean; runId: string };
-type StepPlan = { action: ActionDef; branch?: string };
+/** `logTo` : console qui reçoit la sortie (défaut : « Commandes » du projet). */
+type StepPlan = { action: ActionDef; branch?: string; logTo?: string };
 
 /** Sous-onglet d'une table : ses lignes, sa structure, ou ses relations. */
 const EMPTY_DB_GRAPH: DbGraphState = {
@@ -169,6 +170,26 @@ const tagKey = (l: LogLine): LogLine => {
 };
 
 const MAX_LINES = 5000;
+
+// ----- Consoles d'un projet -----
+// « Lancement » a pour clé de log l'id du projet (sortie du service, côté Rust) ;
+// les consoles libres ajoutent un suffixe : « Commandes » = `${id}#cmd`, les
+// suivantes `${id}#c-<uid>`. Les actions et commandes tapées n'écrivent jamais
+// dans « Lancement ».
+const CONSOLE_SUFFIX = /#c(md|-[0-9a-z]+)$/;
+const cmdKey = (pid: string) => `${pid}#cmd`;
+/** Id du projet d'une clé de console (« Lancement » : la clé elle-même). */
+const consoleBase = (key: string) => key.replace(CONSOLE_SUFFIX, "");
+type SubConsole = { key: string; name: string };
+const SUBS_KEY = "dl.subConsoles";
+function loadSubConsoles(): Record<string, SubConsole[]> {
+  try {
+    const v = JSON.parse(localStorage.getItem(SUBS_KEY) ?? "{}");
+    return v && typeof v === "object" ? v : {};
+  } catch {
+    return {};
+  }
+}
 // Rafraîchissement auto de l'état git : lecture locale (fichiers, ↑) fréquente,
 // fetch distant (↓ à récupérer) espacé pour ne pas solliciter le serveur.
 const GIT_LOCAL_MS = 10_000;
@@ -437,6 +458,26 @@ export default function App() {
   const [openTabs, setOpenTabs] = useState<Set<string>>(new Set());
   const [closedTabs, setClosedTabs] = useState<Set<string>>(new Set());
   const [tabOrder, setTabOrder] = useState<string[]>([]);
+  // Consoles libres par projet (noms et ordre mémorisés, pas leur contenu) et
+  // console affichée dans chaque onglet de projet.
+  const [subConsoles, setSubConsoles] = useState<Record<string, SubConsole[]>>(loadSubConsoles);
+  const [activeSub, setActiveSub] = useState<Record<string, string>>({});
+  // Exécutions en cours par console libre (runId → console + jeton d'annulation),
+  // et leur nombre par console pour l'affichage.
+  const consoleRuns = useRef(new Map<string, { key: string; token?: StepToken }>());
+  const [busyConsoles, setBusyConsoles] = useState<Record<string, number>>({});
+  // Consoles fermées : leurs derniers logs (fin d'une tâche coupée) sont ignorés,
+  // sinon la console réapparaîtrait aussitôt.
+  const closedConsoleKeys = useRef(new Set<string>());
+  // Console libre dont la fermeture attend confirmation (une tâche y tourne).
+  const [closeAsk, setCloseAsk] = useState<{ key: string; name: string } | null>(null);
+  useEffect(() => {
+    try {
+      localStorage.setItem(SUBS_KEY, JSON.stringify(subConsoles));
+    } catch {
+      /* stockage indisponible : consoles non mémorisées */
+    }
+  }, [subConsoles]);
   const logBuf = useRef<LogLine[]>([]);
 
   const [linkModal, setLinkModal] = useState<LinkModalState | null>(null);
@@ -719,6 +760,7 @@ export default function App() {
         // copie de chaque tampon au plus UNE fois par flush (et non par ligne)
         const touched = new Set<string>();
         for (const l of batch) {
+          if (closedConsoleKeys.current.has(l.target)) continue;
           if (!touched.has(l.target)) {
             next[l.target] = next[l.target] ? next[l.target].slice() : [];
             touched.add(l.target);
@@ -1082,8 +1124,25 @@ export default function App() {
     setBranchModal(null);
   }
 
+  // Déclare une console libre (sans effet pour « Lancement » ou si elle existe).
+  const ensureSub = useCallback((key: string) => {
+    const base = consoleBase(key);
+    if (base === key) return;
+    setSubConsoles((m) => {
+      const list = m[base] ?? [];
+      if (list.some((c) => c.key === key)) return m;
+      const name = key === cmdKey(base) ? "Commandes" : `Console ${list.length + 1}`;
+      return { ...m, [base]: [...list, { key, name }] };
+    });
+  }, []);
+
   // ----- Console : ouvrir / épingler un onglet -----
-  const openConsole = useCallback((id: string) => {
+  // `key` : « Lancement » (id du projet) ou une console libre du projet.
+  const openConsole = useCallback((key: string) => {
+    const id = consoleBase(key);
+    closedConsoleKeys.current.delete(key);
+    ensureSub(key);
+    setActiveSub((m) => (m[id] === key ? m : { ...m, [id]: key }));
     // ré-affiche un onglet qu'on aurait fermé
     setClosedTabs((s) => {
       if (!s.has(id)) return s;
@@ -1098,6 +1157,49 @@ export default function App() {
       return n;
     });
     setActiveConsole(id);
+  }, [ensureSub]);
+
+  // Nouvelle console libre dans un projet, affichée aussitôt.
+  const addSubConsole = useCallback(
+    (pid: string) => {
+      const list = subConsoles[pid] ?? [];
+      const key = list.some((c) => c.key === cmdKey(pid)) ? `${pid}#c-${uid()}` : cmdKey(pid);
+      openConsole(key);
+    },
+    [subConsoles, openConsole],
+  );
+  // Ferme une console libre : son contenu est effacé, l'onglet revient à « Lancement ».
+  const closeSubConsole = useCallback((key: string, force = false) => {
+    const base = consoleBase(key);
+    if (base === key) return;
+    if (!force && busyConsoles[key]) {
+      const name = subConsoles[base]?.find((c) => c.key === key)?.name ?? "Commandes";
+      setCloseAsk({ key, name });
+      return;
+    }
+    // Coupe ce qui tourne encore dans la console (l'étape passe « annulée » dans les tâches).
+    for (const [runId, r] of consoleRuns.current) {
+      if (r.key !== key) continue;
+      if (r.token) r.token.cancelled = true;
+      api.cancelAction(runId);
+    }
+    closedConsoleKeys.current.add(key);
+    setSubConsoles((m) => ({ ...m, [base]: (m[base] ?? []).filter((c) => c.key !== key) }));
+    setActiveSub((m) => (m[base] === key ? { ...m, [base]: base } : m));
+    api.clearLogs(key);
+    setLogs((prev) => {
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  }, [busyConsoles, subConsoles]);
+  const renameSubConsole = useCallback((key: string, name: string) => {
+    const base = consoleBase(key);
+    setSubConsoles((m) => ({
+      ...m,
+      [base]: (m[base] ?? []).map((c) => (c.key === key ? { ...c, name } : c)),
+    }));
   }, []);
 
   // Masque un onglet (sans toucher aux logs) : il réapparaît via « Console ».
@@ -1159,12 +1261,13 @@ export default function App() {
       const project = allProjects.find((p) => p.id === svcId);
       const wasRunning = running.has(svcId);
       const rid = () => token?.runId ?? uid();
-      openConsole(svcId);
+      const out = cmdKey(svcId);
+      openConsole(out);
       setBusyFor(svcId, "MAJ du lien…");
       try {
         if (token?.cancelled) return;
         if (wasRunning) {
-          pushLocal(svcId, "■ arrêt avant mise à jour du lien", "sys");
+          pushLocal(out, "■ arrêt avant mise à jour du lien", "sys");
           await api.stopService(svcId);
         }
         if (token?.cancelled) return;
@@ -1186,16 +1289,16 @@ export default function App() {
           `[ -n "$d" ] || continue; ` +
           `if [ -L "$d" ] || [ -f "$d/package.json" ]; then echo "suppression: $d"; rm -rf "$d"; fi; ` +
           `done`;
-        await api.runAction(rid(), svcId, svcPath, rmCmd, bash);
+        await api.runAction(rid(), out, svcPath, rmCmd, bash);
         if (token?.cancelled) return;
-        await api.runAction(rid(), svcId, svcPath, "npm install", bash);
+        await api.runAction(rid(), out, svcPath, "npm install", bash);
         if (token?.cancelled) return;
         if (wasRunning && project?.start_command) {
-          pushLocal(svcId, "▶ redémarrage", "sys");
+          pushLocal(out, "▶ redémarrage", "sys");
           await api.startService(svcId, svcPath, project.start_command, bash, project.port);
         }
       } catch (e) {
-        pushLocal(svcId, `✖ ${e}`, "err");
+        pushLocal(out, `✖ ${e}`, "err");
       } finally {
         setBusyFor(svcId, null);
       }
@@ -1206,32 +1309,32 @@ export default function App() {
   // Lie (chemin local) ou restaure (version) le package dans tous les services
   // qui le déclarent. Renvoie un code (0 = succès).
   const runPackageDep = useCallback(
-    async (p: Project, link: boolean, token?: StepToken): Promise<number> => {
+    async (p: Project, link: boolean, token?: StepToken, out = cmdKey(p.id)): Promise<number> => {
       try {
         const meta = await api.readPackageJson(p.path);
         const value = link ? localLinkValue(p.path) : meta.version;
         const services = await api.packageLinks(servicesForLinks(allProjects), meta.name);
         const present = services.filter((s) => s.present);
-        pushLocal(p.id, `$ ${link ? "Lier" : "Restaurer"} ${meta.name} → ${value}`, "sys");
+        pushLocal(out, `$ ${link ? "Lier" : "Restaurer"} ${meta.name} → ${value}`, "sys");
         if (!present.length) {
-          pushLocal(p.id, `Aucun service n'utilise ${meta.name} — rien à faire.`, "sys");
+          pushLocal(out, `Aucun service n'utilise ${meta.name} — rien à faire.`, "sys");
           return 0;
         }
         for (const s of present) {
           if (token?.cancelled) break;
           try {
             await api.setDepVersion(s.path, meta.name, value);
-            pushLocal(p.id, `✔ ${s.name} — reinstallation…`, "out");
+            pushLocal(out, `✔ ${s.name} — reinstallation…`, "out");
             await postLink(s.id, s.path, meta.name, token);
           } catch (e) {
-            pushLocal(p.id, `✖ ${s.name} : ${e}`, "err");
+            pushLocal(out, `✖ ${s.name} : ${e}`, "err");
           }
         }
-        pushLocal(p.id, `✔ terminé (${present.length} service${present.length > 1 ? "s" : ""})`, "sys");
+        pushLocal(out, `✔ terminé (${present.length} service${present.length > 1 ? "s" : ""})`, "sys");
         setLinkVersion((v) => v + 1);
         return token?.cancelled ? 1 : 0;
       } catch (e) {
-        pushLocal(p.id, `✖ ${e}`, "err");
+        pushLocal(out, `✖ ${e}`, "err");
         return 1;
       }
     },
@@ -1240,7 +1343,13 @@ export default function App() {
 
   // Exécute une action (bash, démarrage/arrêt, tests, ou opération de package).
   const executeAction = useCallback(
-    async (p: Project, a: ActionDef, branch?: string, token?: StepToken): Promise<number> => {
+    async (
+      p: Project,
+      a: ActionDef,
+      branch?: string,
+      token?: StepToken,
+      out = cmdKey(p.id),
+    ): Promise<number> => {
       const runId = token?.runId ?? uid();
       if (a.kind === "start") {
         await startProject(p);
@@ -1255,21 +1364,39 @@ export default function App() {
         await startProject(p);
         return 0;
       }
-      if (a.kind === "link") return runPackageDep(p, true, token);
-      if (a.kind === "restore") return runPackageDep(p, false, token);
-      if (a.kind === "test") {
-        openConsole(p.id);
-        try {
-          const res = await api.runTests(runId, p.id, p.path, a.command || "npm run test:sq", bash);
-          setTestResults((m) => ({ ...m, [p.id]: res }));
-          return res.failed > 0 ? 1 : 0;
-        } catch (e) {
-          console.error(e);
-          return 1;
+      // Tout sauf le démarrage / l'arrêt du service : console « Commandes » (ou celle demandée).
+      openConsole(out);
+      const run = async (): Promise<number> => {
+        if (a.kind === "link") return runPackageDep(p, true, token, out);
+        if (a.kind === "restore") return runPackageDep(p, false, token, out);
+        if (a.kind === "test") {
+          try {
+            const res = await api.runTests(runId, out, p.path, a.command || "npm run test:sq", bash);
+            setTestResults((m) => ({ ...m, [p.id]: res }));
+            return res.failed > 0 ? 1 : 0;
+          } catch (e) {
+            console.error(e);
+            return 1;
+          }
         }
+        const cmd = a.command.replace("{branch}", branch ?? "");
+        return api.runAction(runId, out, p.path, cmd, bash);
+      };
+      // Suivi par console : fermer la console demande confirmation puis coupe la tâche.
+      consoleRuns.current.set(runId, { key: out, token });
+      setBusyConsoles((m) => ({ ...m, [out]: (m[out] ?? 0) + 1 }));
+      try {
+        return await run();
+      } finally {
+        consoleRuns.current.delete(runId);
+        setBusyConsoles((m) => {
+          const n = (m[out] ?? 1) - 1;
+          const next = { ...m };
+          if (n > 0) next[out] = n;
+          else delete next[out];
+          return next;
+        });
       }
-      const cmd = a.command.replace("{branch}", branch ?? "");
-      return api.runAction(runId, p.id, p.path, cmd, bash);
     },
     [bash, running, openConsole, startProject, stopProject, runPackageDep],
   );
@@ -1313,7 +1440,6 @@ export default function App() {
         return "cancelled";
       }
       patchJob(job.id, "running");
-      openConsole(project.id);
       setBusyFor(project.id, job.title);
       let failed = false;
       let cancelled = false;
@@ -1328,7 +1454,7 @@ export default function App() {
         patchStep(job.id, step.id, "running");
         let code = 1;
         try {
-          code = await executeAction(project, plan[i].action, plan[i].branch, token);
+          code = await executeAction(project, plan[i].action, plan[i].branch, token, plan[i].logTo);
         } catch (e) {
           console.error(e);
           code = 1;
@@ -1361,7 +1487,7 @@ export default function App() {
       jobCancelRef.current.delete(job.id);
       return outcome;
     },
-    [executeAction, openConsole, refreshGitFor],
+    [executeAction, refreshGitFor],
   );
 
   // Enchaîne les jobs d'un même projet (file d'attente par projet) : si une
@@ -1378,8 +1504,8 @@ export default function App() {
   );
 
   const runActionOn = useCallback(
-    (p: Project, a: ActionDef, branch?: string) => {
-      const plan: StepPlan[] = [{ action: a, branch }];
+    (p: Project, a: ActionDef, branch?: string, logTo?: string) => {
+      const plan: StepPlan[] = [{ action: a, branch, logTo }];
       const job = createJob(a.label, p, plan);
       setJobs((js) => [job, ...js]);
       return chain(job, p, plan);
@@ -1510,9 +1636,12 @@ export default function App() {
   // Commande saisie manuellement dans la console d'un projet.
   const runCommandIn = useCallback(
     (target: string, command: string) => {
-      const p = allProjects.find((pr) => pr.id === target);
+      const base = consoleBase(target);
+      const p = allProjects.find((pr) => pr.id === base);
       if (!p) return;
-      runActionOn(p, { id: `cmd-${uid()}`, label: command, command, kind: "bash" });
+      // Saisie depuis « Lancement » : la commande part dans « Commandes ».
+      const out = target === base ? cmdKey(base) : target;
+      runActionOn(p, { id: `cmd-${uid()}`, label: command, command, kind: "bash" }, undefined, out);
     },
     [allProjects, runActionOn],
   );
@@ -2738,7 +2867,9 @@ export default function App() {
     const ids = new Set<string>([
       ...running,
       ...openTabs,
-      ...Object.keys(logs).filter((k) => logs[k]?.length),
+      ...Object.keys(logs)
+        .filter((k) => logs[k]?.length)
+        .map(consoleBase),
     ]);
     for (const c of closedTabs) ids.delete(c); // onglets masqués
     const projOrder = allProjects.map((p) => p.id);
@@ -2762,6 +2893,25 @@ export default function App() {
     if (activeConsole && consoleTabs.find((t) => t.id === activeConsole)) return;
     setActiveConsole(consoleTabs[0]?.id ?? null);
   }, [consoleTabs, activeConsole]);
+
+  // Consoles de l'onglet actif : « Lancement » puis les consoles libres (y compris
+  // celles qui ont reçu des logs sans être encore déclarées).
+  const activeConsoleSubs = useMemo(() => {
+    if (!activeConsole) return [];
+    const list = [...(subConsoles[activeConsole] ?? [])];
+    for (const k of Object.keys(logs)) {
+      if (k !== activeConsole && consoleBase(k) === activeConsole && !list.some((c) => c.key === k)) {
+        list.push({ key: k, name: k === cmdKey(activeConsole) ? "Commandes" : `Console ${list.length + 1}` });
+      }
+    }
+    return [
+      { key: activeConsole, name: "Lancement", launch: true, busy: running.has(activeConsole) },
+      ...list.map((c) => ({ ...c, busy: !!busyConsoles[c.key] })),
+    ];
+  }, [activeConsole, subConsoles, logs, running, busyConsoles]);
+  const activeConsoleKey = activeConsole
+    ? activeConsoleSubs.find((c) => c.key === activeSub[activeConsole])?.key ?? activeConsole
+    : null;
 
   // Organisation du tableau de bord : liste à plat ordonnée + dossiers virtuels.
   // `projects` = projets top-level (les enfants fullstack restent imbriqués sous
@@ -3745,20 +3895,57 @@ export default function App() {
               tabs={consoleTabs}
               active={activeConsole}
               setActive={setActiveConsole}
-              lines={activeConsole ? logs[activeConsole] ?? [] : []}
+              lines={activeConsoleKey ? logs[activeConsoleKey] ?? [] : []}
+              subs={activeConsoleSubs}
+              activeSub={activeConsoleKey}
+              setActiveSub={openConsole}
+              onAddSub={() => activeConsole && addSubConsole(activeConsole)}
+              onCloseSub={closeSubConsole}
+              onRenameSub={renameSubConsole}
               onReorder={setTabOrder}
               onRunCommand={runCommandIn}
               wrap={config?.console_wrap ?? true}
               prettyJson={config?.console_json ?? true}
               onShowProjects={projectsHidden ? () => setProjectsHidden(false) : undefined}
               onClear={() => {
-                if (!activeConsole) return;
-                api.clearLogs(activeConsole);
-                setLogs((prev) => ({ ...prev, [activeConsole]: [] }));
+                if (!activeConsoleKey) return;
+                api.clearLogs(activeConsoleKey);
+                setLogs((prev) => ({ ...prev, [activeConsoleKey]: [] }));
               }}
               onClose={closeConsole}
             />
           </section>
+        </div>
+      )}
+
+      {closeAsk && (
+        <div className="modal-backdrop" onMouseDown={() => setCloseAsk(null)}>
+          <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>Fermer « {closeAsk.name} » ?</h3>
+              <button className="tab-close" onClick={() => setCloseAsk(null)}>
+                ×
+              </button>
+            </div>
+            <p className="cf-p">
+              Une tâche est en cours dans cette console. La fermer <b>coupe la tâche</b> et efface sa
+              sortie.
+            </p>
+            <div className="modal-footer">
+              <button className="btn btn-ghost" autoFocus onClick={() => setCloseAsk(null)}>
+                Annuler
+              </button>
+              <button
+                className="btn btn-stop"
+                onClick={() => {
+                  closeSubConsole(closeAsk.key, true);
+                  setCloseAsk(null);
+                }}
+              >
+                Couper et fermer
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
