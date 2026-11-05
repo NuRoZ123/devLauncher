@@ -80,6 +80,8 @@ export const api = {
       track.push(onDefault);
       return r;
     }),
+  /** Branche par défaut du dépôt distant (origin/HEAD), "" si inconnue. */
+  gitDefaultBranch: (git: string, path: string) => invoke<string>("git_default_branch", { git, path }),
   /** Met à jour la branche courante (git pull --autostash, merge ou rebase). */
   gitPull: (git: string, path: string, rebase: boolean, remote?: string, branch?: string) =>
     invoke<string>("git_pull", { git, path, rebase, remote: remote ?? null, branch: branch ?? null }).then(

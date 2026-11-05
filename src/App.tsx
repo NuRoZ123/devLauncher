@@ -47,6 +47,7 @@ import {
   isTypingTarget,
   type BindTarget,
 } from "./keybindings";
+import { DEFAULT_PROTECTED_BRANCHES } from "./protectedBranches";
 import { KeybindingsSettings } from "./components/KeybindingsSettings";
 import {
   resolveLayout,
@@ -3163,6 +3164,22 @@ export default function App() {
           setDetailPath(null);
           setView("dashboard");
           return setProjectsHidden((h) => !h);
+        case "consoleNew":
+          setGitChangesPath(null);
+          setDetailPath(null);
+          setView("dashboard"); // la console n'est visible que sur le tableau de bord
+          return activeConsole && addSubConsole(activeConsole);
+        case "consoleNext":
+        case "consolePrev": {
+          if (!activeConsoleSubs.length) return;
+          const i = activeConsoleSubs.findIndex((c) => c.key === activeConsoleKey);
+          const n = activeConsoleSubs.length;
+          const j = (i + (target.cmd === "consoleNext" ? 1 : n - 1)) % n;
+          return openConsole(activeConsoleSubs[j].key);
+        }
+        case "consoleClose":
+          // « Lancement » ne se ferme pas ; une console occupée demande confirmation.
+          return activeConsoleKey && closeSubConsole(activeConsoleKey);
         case "dashboard":
           setGitChangesPath(null);
           setDetailPath(null);
@@ -3204,6 +3221,12 @@ export default function App() {
       case "console":
         setView("dashboard");
         return onOpenConsoleRow(p);
+      case "commands":
+        setView("dashboard");
+        return openConsole(cmdKey(p.id));
+      case "newConsole":
+        setView("dashboard");
+        return addSubConsole(p.id);
       case "detail":
         setView("dashboard");
         return openDetail(p);
@@ -3723,6 +3746,7 @@ export default function App() {
           hiddenRepoActions={config.repo_actions_hidden?.[gitChangesProject.id]}
           onOpenUrl={openUrl}
           onEditRepo={editRepo}
+          protectedBranches={config.protected_branches ?? DEFAULT_PROTECTED_BRANCHES}
           changelists={config.changelists?.[gitChangesProject.id]}
           onChangelists={(next) => {
             const cfg = configRef.current;
@@ -4505,6 +4529,31 @@ function SettingsView({
                 onChange={(e) => setNotify(e.target.checked)}
               />
               <span>Notifier les badges et succès débloqués (page 🏆)</span>
+            </label>
+
+            <h2>Git</h2>
+            <label className="field">
+              <span>Branches protégées</span>
+              <input
+                value={(draft.protected_branches ?? DEFAULT_PROTECTED_BRANCHES).join(", ")}
+                placeholder="main, master, develop, release/*"
+                onChange={(e) =>
+                  patch(
+                    {
+                      protected_branches: e.target.value
+                        .split(",")
+                        .map((s) => s.trim())
+                        .filter(Boolean),
+                    },
+                    true,
+                  )
+                }
+                onBlur={() => void flush()}
+              />
+              <small className="muted">
+                Séparées par des virgules, <code>*</code> accepté (ex. <code>release/*</code>). Un commit ou un push
+                direct sur l'une d'elles — ou sur la branche principale du dépôt distant — demande confirmation.
+              </small>
             </label>
 
             <h2>Console</h2>

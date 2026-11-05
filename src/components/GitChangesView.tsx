@@ -24,6 +24,7 @@ import {
 } from "../changelists";
 import { ConflictsModal, OP_LABEL, UpdateModal, type PullTarget } from "./ConflictsModal";
 import { MergeView } from "./MergeView";
+import { protectedMatch } from "../protectedBranches";
 import { awaitFetch, fetchRepo } from "../gitFetch";
 import {
   DndContext,
@@ -85,6 +86,8 @@ interface Props {
   hiddenRepoActions?: string[];
   onOpenUrl: (url: string) => void;
   onEditRepo: (p: Project) => void;
+  /** Motifs des branches protégées (commit / push direct à confirmer). */
+  protectedBranches: string[];
 }
 
 /** Libellé long d'un code de statut git, pour l'infobulle du badge. */
@@ -133,6 +136,7 @@ export function GitChangesView({
   hiddenRepoActions,
   onOpenUrl,
   onEditRepo,
+  protectedBranches,
 }: Props) {
   // Liens du dépôt en ligne (MR/PR, pipelines, branche…), suivant la branche.
   const repoLinks = repoLink ? buildRepoLinks(repoLink, git?.branch) : null;
@@ -184,6 +188,20 @@ export function GitChangesView({
     document.addEventListener("mousedown", onDown);
     return () => document.removeEventListener("mousedown", onDown);
   }, [commitMenu, linksMenu]);
+  // Branche principale du dépôt (origin/HEAD) : lue une fois, elle change rarement.
+  const [defaultBranch, setDefaultBranch] = useState("");
+  useEffect(() => {
+    api.gitDefaultBranch(gitExe, project.path).then(setDefaultBranch, () => setDefaultBranch(""));
+  }, [gitExe, project.path]);
+  // Branche courante principale ou protégée : commit / push demandent confirmation.
+  const branchGuard = (() => {
+    const b = git?.branch;
+    if (!b || b === "HEAD") return null;
+    if (defaultBranch && b === defaultBranch) return { branch: b, kind: "principale" };
+    const m = protectedMatch(b, protectedBranches);
+    return m ? { branch: b, kind: m === b ? "protégée" : `protégée (${m})` } : null;
+  })();
+  const [guardAsk, setGuardAsk] = useState<"commit" | "commitPush" | "push" | null>(null);
   // Sortie de la dernière commande (commit/push) affichée en bas de page.
   const [output, setOutput] = useState<{ ok: boolean; text: string } | null>(null);
   // Glisser-déposer (dnd-kit) entre les deux listes.
@@ -503,8 +521,9 @@ export function GitChangesView({
 
   /** Commit (et push dans la foulée si `andPush`, comme « Commit and Push » de JetBrains). */
   const commit = useCallback(
-    async (andPush = false) => {
+    async (andPush = false, confirmed = false) => {
       if (busy || staged.length === 0 || !message.trim()) return;
+      if (branchGuard && !confirmed) return setGuardAsk(andPush ? "commitPush" : "commit");
       setBusy(true);
       setError(null);
       try {
@@ -522,11 +541,12 @@ export function GitChangesView({
         setBusy(false);
       }
     },
-    [gitExe, project.path, busy, staged.length, message, flush, reload, onChanged, doPush],
+    [gitExe, project.path, busy, staged.length, message, flush, reload, onChanged, doPush, branchGuard],
   );
 
-  const push = useCallback(async () => {
+  const push = useCallback(async (confirmed = false) => {
     if (busy) return;
+    if (branchGuard && !confirmed) return setGuardAsk("push");
     setBusy(true);
     setError(null);
     try {
@@ -534,7 +554,7 @@ export function GitChangesView({
     } finally {
       setBusy(false);
     }
-  }, [busy, doPush]);
+  }, [busy, doPush, branchGuard]);
 
   /** Fin d'une mise à jour réussie (plus de conflit) : relit l'état, relance le push éventuel. */
   const finishUpdate = useCallback(
@@ -948,6 +968,43 @@ export function GitChangesView({
 
   return (
     <div className="settings">
+      {guardAsk && branchGuard && (
+        <div className="modal-backdrop" onMouseDown={() => setGuardAsk(null)}>
+          <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>
+                {guardAsk === "push" ? "Pousser" : guardAsk === "commit" ? "Committer" : "Committer et pousser"} sur «{" "}
+                {branchGuard.branch} » ?
+              </h3>
+              <button className="tab-close" onClick={() => setGuardAsk(null)}>
+                ×
+              </button>
+            </div>
+            <p className="cf-p">
+              <b>{branchGuard.branch}</b> est une branche {branchGuard.kind}.{" "}
+              {guardAsk === "commit"
+                ? "Committer directement dessus contourne la relecture habituelle (branche dédiée + merge request)."
+                : "Pousser directement dessus publie les changements sans relecture (branche dédiée + merge request)."}
+            </p>
+            <div className="modal-footer">
+              <button className="btn btn-ghost" autoFocus onClick={() => setGuardAsk(null)}>
+                Annuler
+              </button>
+              <button
+                className="btn btn-stop"
+                onClick={() => {
+                  const a = guardAsk;
+                  setGuardAsk(null);
+                  if (a === "push") void push(true);
+                  else void commit(a === "commitPush", true);
+                }}
+              >
+                {guardAsk === "push" ? "Pousser quand même" : "Committer quand même"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {rollbackAsk && (
         <div className="modal-backdrop" onMouseDown={() => setRollbackAsk(null)}>
           <div
@@ -1197,7 +1254,7 @@ export function GitChangesView({
                   <button
                     className="btn btn-sm btn-primary"
                     disabled={busy || !!mergeState?.operation}
-                    onClick={push}
+                    onClick={() => void push()}
                     title={outgoing.upstream ? `git push vers ${outgoing.upstream}` : "git push -u origin HEAD (crée la branche distante)"}
                   >
                     Push
@@ -1408,6 +1465,12 @@ export function GitChangesView({
 
         <section className="detail-section gc-commit">
           <h2>Valider</h2>
+          {branchGuard && (
+            <div className="gc-protected-warn">
+              ⚠ Vous êtes sur <b>{branchGuard.branch}</b>, branche {branchGuard.kind} : commit et push
+              direct demanderont confirmation.
+            </div>
+          )}
           <textarea
             className="gc-message"
             placeholder="Message de commit…"
@@ -1471,7 +1534,7 @@ export function GitChangesView({
             >
               Pull
             </button>
-            <button className="btn" onClick={push} disabled={busy || !!mergeState?.operation} title="git push">
+            <button className="btn" onClick={() => void push()} disabled={busy || !!mergeState?.operation} title="git push">
               Push
             </button>
             {busy && <span className="spinner spinner-xs" />}

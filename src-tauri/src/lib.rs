@@ -281,6 +281,9 @@ struct Config {
     /// Console : lignes JSON rendues colorées et indentées (absent = activé).
     #[serde(default)]
     console_json: Option<bool>,
+    /// Branches protégées (motifs, « * » accepté) : commit / push direct à confirmer.
+    #[serde(default)]
+    protected_branches: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -2140,37 +2143,53 @@ async fn git_push(git: String, path: String) -> Result<String, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Branche courante et branche par défaut de son remote (origin/HEAD) ; la
+/// seconde est vide si elle est introuvable (pas de remote, HEAD détaché…).
+fn current_and_default_branch(git: &str, path: &str) -> Result<(String, String), String> {
+    let cur = git_read(git, path, &["rev-parse", "--abbrev-ref", "HEAD"])?.trim().to_string();
+    if cur.is_empty() || cur == "HEAD" {
+        return Ok((cur, String::new()));
+    }
+    let remote = {
+        let r = git_read(git, path, &["config", &format!("branch.{cur}.remote")])?;
+        let r = r.trim();
+        if r.is_empty() { "origin".to_string() } else { r.to_string() }
+    };
+    // Référence locale origin/HEAD (posée au clone) ; sinon on interroge le remote.
+    let local = git_read(git, path, &["symbolic-ref", "--short", &format!("refs/remotes/{remote}/HEAD")])?;
+    let default = match local.trim().strip_prefix(&format!("{remote}/")) {
+        Some(b) if !b.is_empty() => b.to_string(),
+        _ => {
+            let out = git_read(git, path, &["ls-remote", "--symref", &remote, "HEAD"])?;
+            out.lines()
+                .find_map(|l| l.strip_prefix("ref: refs/heads/"))
+                .and_then(|l| l.split('\t').next())
+                .unwrap_or("")
+                .to_string()
+        }
+    };
+    Ok((cur, default))
+}
+
 /// La branche courante est-elle la branche par défaut du remote (origin/HEAD) ?
 /// Sert au succès « Sans filet » (push direct sur la branche par défaut).
 #[tauri::command]
 async fn git_on_default_branch(git: String, path: String) -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let cur = git_read(&git, &path, &["rev-parse", "--abbrev-ref", "HEAD"])?.trim().to_string();
-        if cur.is_empty() || cur == "HEAD" {
-            return Ok(false);
-        }
-        let remote = {
-            let r = git_read(&git, &path, &["config", &format!("branch.{cur}.remote")])?;
-            let r = r.trim();
-            if r.is_empty() { "origin".to_string() } else { r.to_string() }
-        };
-        // Référence locale origin/HEAD (posée au clone) ; sinon on interroge le remote.
-        let local = git_read(&git, &path, &["symbolic-ref", "--short", &format!("refs/remotes/{remote}/HEAD")])?;
-        let default = match local.trim().strip_prefix(&format!("{remote}/")) {
-            Some(b) if !b.is_empty() => b.to_string(),
-            _ => {
-                let out = git_read(&git, &path, &["ls-remote", "--symref", &remote, "HEAD"])?;
-                out.lines()
-                    .find_map(|l| l.strip_prefix("ref: refs/heads/"))
-                    .and_then(|l| l.split('\t').next())
-                    .unwrap_or("")
-                    .to_string()
-            }
-        };
+        let (cur, default) = current_and_default_branch(&git, &path)?;
         Ok(!default.is_empty() && default == cur)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Branche par défaut du remote de la branche courante ("" si inconnue) :
+/// sert à prévenir avant un commit / push direct sur la branche principale.
+#[tauri::command]
+async fn git_default_branch(git: String, path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || Ok(current_and_default_branch(&git, &path)?.1))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 // ---------------------------------------------------------------------------
@@ -7125,6 +7144,7 @@ pub fn run() {
             load_stats,
             save_stats,
             git_on_default_branch,
+            git_default_branch,
             scan_projects,
             list_subdirs,
             git_info,

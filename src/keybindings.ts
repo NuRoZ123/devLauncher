@@ -14,9 +14,22 @@ export type AppCmd =
   | "settings"
   | "stats"
   | "dashboard"
-  | "projectsPanel";
+  | "projectsPanel"
+  | "consoleNew"
+  | "consoleNext"
+  | "consolePrev"
+  | "consoleClose";
 
-export type ProjCmd = "start" | "stop" | "toggle" | "console" | "git" | "db" | "detail";
+export type ProjCmd =
+  | "start"
+  | "stop"
+  | "toggle"
+  | "console"
+  | "commands"
+  | "newConsole"
+  | "git"
+  | "db"
+  | "detail";
 
 /** Ce que déclenche un raccourci (interprété par App). */
 export type BindTarget =
@@ -47,6 +60,10 @@ const APP_CMDS: { cmd: AppCmd; label: string }[] = [
   { cmd: "stats", label: "🏆 Ouvrir / fermer les stats" },
   { cmd: "dashboard", label: "⌂ Revenir au tableau de bord" },
   { cmd: "projectsPanel", label: "◧ Afficher / masquer la liste des projets" },
+  { cmd: "consoleNew", label: "＋ Nouvelle console (projet affiché)" },
+  { cmd: "consoleNext", label: "⇥ Console suivante (projet affiché)" },
+  { cmd: "consolePrev", label: "⇤ Console précédente (projet affiché)" },
+  { cmd: "consoleClose", label: "✕ Fermer la console affichée" },
 ];
 
 /** Liste de tout ce qui peut recevoir un raccourci, dans l'ordre d'affichage. */
@@ -92,7 +109,9 @@ export function buildBindables(
       add("git", "⎇ Changements git", { t: "proj", pid: p.id, cmd: "git" });
       continue; // parent purement structurel : le reste se fait sur les sous-projets
     }
-    add("console", "▤ Console", { t: "proj", pid: p.id, cmd: "console" });
+    add("console", "▤ Console de lancement", { t: "proj", pid: p.id, cmd: "console" });
+    add("commands", "⌨ Console « Commandes »", { t: "proj", pid: p.id, cmd: "commands" });
+    add("newConsole", "＋ Nouvelle console", { t: "proj", pid: p.id, cmd: "newConsole" });
     add("detail", "ⓘ Fiche du projet", { t: "proj", pid: p.id, cmd: "detail" });
     add("git", "⎇ Changements git", { t: "proj", pid: p.id, cmd: "git" });
     if (dbConnected(p.id)) add("db", "🗄 Base de données", { t: "proj", pid: p.id, cmd: "db" });

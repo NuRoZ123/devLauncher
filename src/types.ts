@@ -603,6 +603,8 @@ export interface Config {
   console_wrap?: boolean;
   /** Console : lignes JSON affichées colorées et indentées (absent = activé). */
   console_json?: boolean;
+  /** Branches protégées (motifs, « * » accepté) : commit / push direct à confirmer. Absent = défaut. */
+  protected_branches?: string[];
 }
 
 export interface PkgMeta {
