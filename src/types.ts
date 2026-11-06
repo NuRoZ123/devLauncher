@@ -605,6 +605,14 @@ export interface Config {
   console_json?: boolean;
   /** Branches protégées (motifs, « * » accepté) : commit / push direct à confirmer. Absent = défaut. */
   protected_branches?: string[];
+  /** URL ouverte au clic sur le port d'un service / front : id de projet → schéma + chemin. */
+  service_urls?: Record<string, ServiceUrl>;
+}
+
+/** Réglage d'URL locale d'un service : https (sinon http) et suite de l'URL ("/api"). */
+export interface ServiceUrl {
+  https?: boolean;
+  path?: string;
 }
 
 export interface PkgMeta {

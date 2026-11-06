@@ -47,6 +47,7 @@ import {
   isTypingTarget,
   type BindTarget,
 } from "./keybindings";
+import { getMotionDuration, setMotionDuration, MOTION_DEFAULT_MS, MOTION_MAX_MS } from "./motion";
 import { DEFAULT_PROTECTED_BRANCHES } from "./protectedBranches";
 import { KeybindingsSettings } from "./components/KeybindingsSettings";
 import {
@@ -87,6 +88,7 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { parseEnv } from "./env";
+import { hasServiceUrl, isDefaultServiceUrl, serviceUrlFor } from "./serviceUrl";
 import { basename, dirname, samePath } from "./paths";
 import { StatsToasts, StatsView, TrophyButton } from "./components/StatsView";
 import { setNotify, track as trackStats, useStats } from "./stats";
@@ -111,6 +113,7 @@ import type {
   Sequence,
   ServiceDep,
   TestResult,
+  ServiceUrl,
 } from "./types";
 
 type StepToken = { cancelled: boolean; runId: string };
@@ -2780,6 +2783,7 @@ export default function App() {
         db_connections: renameKey(config.db_connections),
         db_disabled: renameKey(config.db_disabled),
         db_layouts: renameKey(config.db_layouts),
+        service_urls: renameKey(config.service_urls),
       });
     },
     [config, persist],
@@ -2813,6 +2817,20 @@ export default function App() {
         next[p.id] = url;
       }
       await persist({ ...config, project_links: next });
+    },
+    [config, persist],
+  );
+
+  // Réglage d'URL locale (clic sur le port) : null = défaut (http, sans chemin).
+  const setServiceUrl = useCallback(
+    async (p: Project, v: ServiceUrl | null) => {
+      if (!config) return;
+      const next = { ...(config.service_urls ?? {}) };
+      if (v == null) {
+        if (!(p.id in next)) return;
+        delete next[p.id];
+      } else next[p.id] = v;
+      await persist({ ...config, service_urls: next });
     },
     [config, persist],
   );
@@ -3235,6 +3253,10 @@ export default function App() {
         return openGitChanges(p);
       case "db":
         return void openDbWorkspace(p);
+      case "openUrl": {
+        const url = serviceUrlFor(p, config?.service_urls?.[p.id]);
+        return url && openUrl(url);
+      }
     }
   };
 
@@ -3337,6 +3359,8 @@ export default function App() {
       onEditStartCommand={openProjectCommand}
       repoLink={repoLinkFor(p)}
       onOpenUrl={openUrl}
+      serviceUrl={config?.service_urls?.[p.id]}
+      onSaveServiceUrl={setServiceUrl}
       onEditRepo={editRepo}
       onOpenDetail={openDetail}
       onOpenGitChanges={openGitChanges}
@@ -4310,6 +4334,12 @@ function SettingsView({
   const [hscroll, setHscroll] = useState(getHScrollSettings);
   // Réglage stocké dans stats.json, appliqué immédiatement (hors brouillon).
   const statsNotify = useStats().notify;
+  // Durée des animations : propre au poste (localStorage), appliquée aussitôt.
+  const [motionMs, setMotionMs] = useState(getMotionDuration);
+  const changeMotion = (ms: number) => {
+    setMotionDuration(ms);
+    setMotionMs(getMotionDuration());
+  };
   const changeHscroll = (p: Partial<typeof hscroll>) => {
     setHScrollSettings(p);
     setHscroll(getHScrollSettings());
@@ -4471,6 +4501,64 @@ function SettingsView({
               onChange={(s) => patch({ sources: s })}
               addButtonsOnTop
             />
+            <h2>URL des services</h2>
+            <p className="muted settings-hint">
+              Un clic sur le port d'un service ou d'un front ouvre son URL locale. Choisissez
+              http ou https et la suite de l'URL (ex. <code>/api</code>). Aussi réglable par clic
+              droit sur le port, et un raccourci « Ouvrir l'URL » est disponible par projet dans
+              l'onglet Raccourcis.
+            </p>
+            {(() => {
+              const urlProjects = projects.filter(hasServiceUrl);
+              if (urlProjects.length === 0) {
+                return <p className="muted">Aucun service ou front avec un port détecté.</p>;
+              }
+              const urls = draft.service_urls ?? {};
+              const set = (pid: string, v: ServiceUrl, debounce = false) => {
+                const next = { ...(draftRef.current.service_urls ?? {}) };
+                if (isDefaultServiceUrl(v)) delete next[pid];
+                else next[pid] = v;
+                patch({ service_urls: next }, debounce);
+              };
+              return (
+                <div className="service-url-list">
+                  {urlProjects.map((p) => {
+                    const v = urls[p.id] ?? {};
+                    return (
+                      <div className="service-url-row" key={p.id}>
+                        <span className="service-url-name" title={p.path}>
+                          {p.name}
+                        </span>
+                        <select
+                          value={v.https ? "https" : "http"}
+                          onChange={(e) => set(p.id, { ...v, https: e.target.value === "https" })}
+                        >
+                          <option value="http">http</option>
+                          <option value="https">https</option>
+                        </select>
+                        <span className="muted service-url-host">localhost:{p.port}</span>
+                        <input
+                          value={v.path ?? ""}
+                          placeholder="/"
+                          spellCheck={false}
+                          onChange={(e) => set(p.id, { ...v, path: e.target.value }, true)}
+                        />
+                        <button
+                          className="btn btn-sm"
+                          title={serviceUrlFor(p, v) ?? ""}
+                          onClick={() => {
+                            const url = serviceUrlFor(p, v);
+                            if (url) void api.openUrl(url);
+                          }}
+                        >
+                          Ouvrir ↗
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
           </>
         )}
 
@@ -4572,6 +4660,43 @@ function SettingsView({
                 onChange={(e) => patch({ console_json: e.target.checked })}
               />
               <span>Afficher les lignes JSON colorées et indentées</span>
+            </label>
+
+            <h2>Animations</h2>
+            <label className="field">
+              <span>Durée des animations d'ouverture / fermeture</span>
+              <small className="muted">
+                Fenêtres, menus, panneaux, dossiers, onglets, notifications… À 0, plus aucune
+                animation (ni transition). Réglage propre à ce poste.
+              </small>
+              <div className="field-row range-row">
+                <input
+                  type="range"
+                  min={0}
+                  max={MOTION_MAX_MS}
+                  step={10}
+                  value={motionMs}
+                  onChange={(e) => changeMotion(Number(e.target.value))}
+                />
+                <span className="range-value">{motionMs === 0 ? "Aucune" : `${motionMs} ms`}</span>
+              </div>
+              <div className="field-row motion-presets">
+                {[
+                  { ms: 0, label: "Aucune" },
+                  { ms: 120, label: "Rapide" },
+                  { ms: MOTION_DEFAULT_MS, label: "Normale" },
+                  { ms: 320, label: "Lente" },
+                ].map((o) => (
+                  <button
+                    key={o.ms}
+                    type="button"
+                    className={"btn btn-ghost btn-sm" + (motionMs === o.ms ? " active" : "")}
+                    onClick={() => changeMotion(o.ms)}
+                  >
+                    {o.label}
+                  </button>
+                ))}
+              </div>
             </label>
 
             <h2>Souris : défilement horizontal</h2>

@@ -284,6 +284,10 @@ struct Config {
     /// Branches protégées (motifs, « * » accepté) : commit / push direct à confirmer.
     #[serde(default)]
     protected_branches: Option<Vec<String>>,
+    /// URL ouverte au clic sur le port d'un service / front : id → { https, path }.
+    /// Opaque côté Rust, interprétée par l'interface.
+    #[serde(default)]
+    service_urls: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -730,8 +734,28 @@ fn open_url(url: String) -> Result<(), String> {
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err("URL invalide".into());
     }
-    std::process::Command::new("cmd")
-        .args(["/C", "start", "", &url])
+    // ShellExecuteW direct : le navigateur par défaut s'ouvre sans passer par
+    // cmd.exe (plus de console qui clignote, démarrage plus rapide). Lancé sur
+    // un thread : l'appel peut prendre un instant sans figer l'interface.
+    #[cfg(windows)]
+    std::thread::spawn(move || {
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+        let (verb, target) = (wide("open"), wide(&url));
+        unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                verb.as_ptr(),
+                target.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1, // SW_SHOWNORMAL
+            );
+        }
+    });
+    #[cfg(not(windows))]
+    std::process::Command::new("xdg-open")
+        .arg(&url)
         .spawn()
         .map_err(|e| e.to_string())?;
     Ok(())

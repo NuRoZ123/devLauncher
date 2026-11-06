@@ -2,6 +2,8 @@ import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 
 import { actionAllowed } from "../constants";
 import { buildRepoLinks, repoActions } from "../repo";
 import { expandActions, isSequenceValid } from "../sequences";
+import { hasServiceUrl, serviceUrlFor } from "../serviceUrl";
+import { PortUrlMenu } from "./PortUrlMenu";
 import type {
   ActionDef,
   DbConnection,
@@ -9,6 +11,7 @@ import type {
   PortInfo,
   Project,
   Sequence,
+  ServiceUrl,
   TestResult,
 } from "../types";
 
@@ -53,6 +56,10 @@ interface Props {
   repoLink?: string;
   /** Ouvre une URL dans le navigateur (actions du menu dépôt). */
   onOpenUrl: (url: string) => void;
+  /** Réglage d'URL locale (http/https + chemin) ouverte au clic sur le port. */
+  serviceUrl?: ServiceUrl;
+  /** Enregistre le réglage d'URL locale (null = retour au défaut http, sans chemin). */
+  onSaveServiceUrl: (p: Project, v: ServiceUrl | null) => void;
   /** Ouvre l'édition du lien de dépôt (clic droit, ou clic si aucun lien). */
   onEditRepo: (p: Project) => void;
   /** Ouvre la page de détail du projet (clic sur le nom). */
@@ -278,6 +285,8 @@ export const ProjectRow = memo(function ProjectRow({
   onEditStartCommand,
   repoLink,
   onOpenUrl,
+  serviceUrl,
+  onSaveServiceUrl,
   onEditRepo,
   onOpenDetail,
   onOpenGitChanges,
@@ -512,6 +521,27 @@ export const ProjectRow = memo(function ProjectRow({
         top: Math.max(RM_MG, Math.min(repoMenu.y, window.innerHeight - RM_H - RM_MG)),
       }
     : undefined;
+
+  // ----- Puce du port : clic = ouvre l'URL locale, clic droit = http/https + chemin -----
+  const urlable = hasServiceUrl(project);
+  const portUrl = urlable ? serviceUrlFor(project, serviceUrl) : null;
+  const [portMenu, setPortMenu] = useState<{ x: number; y: number } | null>(null);
+  const portHandlers = urlable
+    ? {
+        role: "button",
+        tabIndex: 0,
+        onClick: () => portUrl && onOpenUrl(portUrl),
+        onKeyDown: (e: React.KeyboardEvent) => {
+          if (e.key === "Enter" && portUrl) onOpenUrl(portUrl);
+        },
+        onContextMenu: (e: React.MouseEvent) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setPortMenu({ x: e.clientX, y: e.clientY + 4 });
+        },
+      }
+    : {};
+  const portHint = urlable ? ` · clic : ouvrir ${portUrl} · clic droit : http/https, chemin` : "";
 
   // Modifications non commitées : le compteur (● N) est masqué au palier réduit.
   // La puce d'état à gauche garde son sens d'origine : gris = arrêté, vert = lancé,
@@ -764,8 +794,9 @@ export const ProjectRow = memo(function ProjectRow({
               if (inUse && !owned && !running) {
                 return (
                   <span
-                    className="chip chip-port-busy"
-                    title={`Port occupé par un autre process (PID ${portInfo?.pids.join(", ")})`}
+                    className={"chip chip-port-busy" + (urlable ? " chip-port-link" : "")}
+                    title={`Port occupé par un autre process (PID ${portInfo?.pids.join(", ")})${portHint}`}
+                    {...portHandlers}
                   >
                     ⚠ :{project.port}
                     <button
@@ -787,13 +818,21 @@ export const ProjectRow = memo(function ProjectRow({
               if (hidePort) return null;
               if (inUse && (owned || running)) {
                 return (
-                  <span className="chip chip-port-active" title="Service en écoute (lancé par l'app)">
+                  <span
+                    className={"chip chip-port-active" + (urlable ? " chip-port-link" : "")}
+                    title={`Service en écoute (lancé par l'app)${portHint}`}
+                    {...portHandlers}
+                  >
                     :{project.port}
                   </span>
                 );
               }
               return (
-                <span className="chip chip-port" title="Port du service (libre)">
+                <span
+                  className={"chip chip-port" + (urlable ? " chip-port-link" : "")}
+                  title={`Port du service (libre)${portHint}`}
+                  {...portHandlers}
+                >
                   :{project.port}
                 </span>
               );
@@ -1007,6 +1046,17 @@ export const ProjectRow = memo(function ProjectRow({
           )
         ) : null}
       </div>
+
+      {portMenu && (
+        <PortUrlMenu
+          project={project}
+          at={portMenu}
+          value={serviceUrl}
+          onSave={onSaveServiceUrl}
+          onOpenUrl={onOpenUrl}
+          onClose={() => setPortMenu(null)}
+        />
+      )}
 
       {/* Menu des liens : seulement pour un dossier non versionné lié à un dépôt
           (pour un projet git, ces liens sont dans l'onglet git). */}

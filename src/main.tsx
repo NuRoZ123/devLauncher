@@ -5,9 +5,11 @@ import "./styles.css";
 import { installWheelHandling } from "./wheel";
 import { initStats } from "./stats";
 import { installModalKeys } from "./modalKeys";
+import { installMotion } from "./motion";
 
 installWheelHandling();
 installModalKeys();
+installMotion();
 void initStats();
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(

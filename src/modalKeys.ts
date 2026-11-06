@@ -5,7 +5,7 @@
 
 /** Modale la plus haute (la dernière montée dans le DOM). */
 function topModal(): HTMLElement | null {
-  const backdrops = document.querySelectorAll<HTMLElement>(".modal-backdrop");
+  const backdrops = document.querySelectorAll<HTMLElement>(".modal-backdrop:not(.motion-ghost)");
   const top = backdrops[backdrops.length - 1];
   return top?.querySelector<HTMLElement>(".modal") ?? null;
 }

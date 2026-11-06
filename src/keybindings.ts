@@ -2,6 +2,7 @@
 // l'application peut recevoir une combinaison de touches depuis Réglages →
 // Raccourcis. Stockés dans la config : id d'action → combinaison ("Ctrl+Shift+S").
 import { actionAllowed } from "./constants";
+import { hasServiceUrl } from "./serviceUrl";
 import type { ActionDef, Project, Sequence } from "./types";
 
 export type AppCmd =
@@ -29,7 +30,8 @@ export type ProjCmd =
   | "newConsole"
   | "git"
   | "db"
-  | "detail";
+  | "detail"
+  | "openUrl";
 
 /** Ce que déclenche un raccourci (interprété par App). */
 export type BindTarget =
@@ -113,6 +115,9 @@ export function buildBindables(
     add("commands", "⌨ Console « Commandes »", { t: "proj", pid: p.id, cmd: "commands" });
     add("newConsole", "＋ Nouvelle console", { t: "proj", pid: p.id, cmd: "newConsole" });
     add("detail", "ⓘ Fiche du projet", { t: "proj", pid: p.id, cmd: "detail" });
+    if (hasServiceUrl(p)) {
+      add("openUrl", `🌐 Ouvrir l'URL (localhost:${p.port})`, { t: "proj", pid: p.id, cmd: "openUrl" });
+    }
     add("git", "⎇ Changements git", { t: "proj", pid: p.id, cmd: "git" });
     if (dbConnected(p.id)) add("db", "🗄 Base de données", { t: "proj", pid: p.id, cmd: "db" });
     for (const a of projActions.filter((a) => actionAllowed(a, p))) {
